@@ -22,6 +22,7 @@ use std::{
 
 const IO_BLOCK: usize = 1024 * 1024;
 const MAX_REMOTE_WORKERS: usize = 64;
+pub const DEFAULT_CAS_UPLOAD_WORKERS: usize = 8;
 
 #[derive(Debug, serde::Serialize)]
 pub struct PullReport {
@@ -40,6 +41,7 @@ pub struct PushReport {
     pub files_uploaded: u64,
     pub symlinks_skipped: u64,
     pub bytes_uploaded: u64,
+    pub native_cas_upload_workers: Option<usize>,
     pub commit_oid: Option<String>,
     pub commit_url: Option<String>,
 }
@@ -326,8 +328,17 @@ pub fn push(
     revision: &str,
     prefix: Option<&str>,
     commit_message: &str,
+    workers: usize,
 ) -> anyhow::Result<PushReport> {
-    push_native::push(fs, repo_id, repo_type, revision, prefix, commit_message)
+    push_native::push(
+        fs,
+        repo_id,
+        repo_type,
+        revision,
+        prefix,
+        commit_message,
+        workers,
+    )
 }
 
 fn push_official(
@@ -392,6 +403,7 @@ fn push_official(
         files_uploaded: local_files.len() as u64,
         symlinks_skipped: skipped_symlinks,
         bytes_uploaded,
+        native_cas_upload_workers: None,
         commit_oid: result.commit_oid,
         commit_url: result.commit_url,
     })

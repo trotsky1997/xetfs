@@ -72,7 +72,7 @@ $XETFS_BIN remote cat owner/dataset train/weights.bin \
 $XETFS_BIN --repo ./demo.repo ls /train
 $XETFS_BIN --repo ./demo.repo remote push owner/dataset \
   --repo-type dataset --revision main --prefix train \
-  --message "Update training data"
+  --message "Update training data" --workers 8
 ```
 
 `--prefix` 是 Hub 仓库内的相对目录。pull 导入后保留同一路径；push 选择本地同名目录并上传到 Hub 同一路径；mount 则把该目录作为挂载根。pull 遇到已存在且 Xet 文件哈希与长度都相同的文件会跳过；其他同名文件需要 `--force` 才会覆盖。push 只新增或更新文件，不会删除 Hub 上多余的文件；Hub 不存储空目录，符号链接会跳过并计入结果。
@@ -95,6 +95,8 @@ fusermount3 -u ./hub-view
 pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 到 64，默认 8。报告中的 `workers` 记录本次配置。
 
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
+
+`remote push --workers` 控制本地不同 Xorb 对象的并发 CAS 上传，默认 8、范围 1–64。上传按最多 128 MiB 的批次读取本地对象，先验证所有文件重建清单，再并发发送去重后的 Xorb，最后写 metadata shard 和一次 Hub commit；打开写句柄或回退到官方流式客户端时，此参数不改变其上传并发策略。JSON 结果会标明 native CAS 实际 worker 配置。
 
 Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直接按 4 MiB 对齐窗口读取 Xet CAS；HTTP 连接池与短期 token 在一次挂载生命周期中复用，窗口缓存在有界 LRU 内存中。它是只读挂载，默认缓存 256 MiB（`--cache-mib` 可设为 4–16384），`--workers` 控制每个窗口的 CAS 并发请求数。指定 `--prefix` 时该子目录成为挂载根。仅展示 Hub 标记为 Xet 存储的常规文件；inline/LFS 非 Xet 文件会在启动摘要中计数并略过。文件树是挂载时的 revision 元数据快照，不会跟随分支更新；范围读取验证 reconstruction、Xorb 记录与 chunk 哈希，只有完整文件读取时才能验证整个文件根哈希。卸载方式与本地 FUSE 相同。
 

@@ -169,6 +169,13 @@ enum RemoteCommand {
         /// Commit message on the Hub.
         #[arg(long, default_value = "Sync from XetFS")]
         message: String,
+        /// Maximum concurrent native Xet CAS Xorb uploads (1-64, bounded-memory batches).
+        #[arg(
+            long,
+            default_value_t = xetfs::remote::DEFAULT_CAS_UPLOAD_WORKERS,
+            value_parser = parse_workers
+        )]
+        workers: usize,
     },
     /// Mount a Hub revision as a read-only, on-demand Linux filesystem.
     Mount {
@@ -582,13 +589,18 @@ fn main() -> Result<()> {
             RemoteCommand::Mount { .. } => {
                 unreachable!("remote mount is handled before opening a local repository")
             }
-            RemoteCommand::Push { hub, message } => json(&xetfs::remote::push(
+            RemoteCommand::Push {
+                hub,
+                message,
+                workers,
+            } => json(&xetfs::remote::push(
                 &fs,
                 &hub.repo_id,
                 hub.repo_type.as_str(),
                 &hub.revision,
                 hub.prefix.as_deref(),
                 &message,
+                workers,
             )?)?,
         },
         Command::Mount { mountpoint } => {

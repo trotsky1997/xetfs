@@ -55,11 +55,14 @@ def main() -> None:
     parser.add_argument("repo_id", help="Target Hugging Face dataset, for example owner/name")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--size-mib", type=int, default=12)
+    parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
     if args.size_mib < 11 or args.size_mib > 64:
         parser.error("--size-mib must be between 11 and 64 so the file uses the Xet path")
+    if args.workers < 1 or args.workers > 64:
+        parser.error("--workers must be between 1 and 64")
 
     binary = args.binary.resolve()
     size = args.size_mib * 1024 * 1024
@@ -108,6 +111,8 @@ def main() -> None:
                     prefix,
                     "--message",
                     f"XetFS remote write acceptance {run_id}",
+                    "--workers",
+                    str(args.workers),
                 ]
             )
         )
@@ -189,6 +194,7 @@ def main() -> None:
             "upload_source_strategy": "native Xet CAS transfer from committed XetFS Xorbs and a generated metadata shard",
             "xetfs_full_file_staging_bytes": 0,
             "native_push_seconds": native_push_seconds,
+            "native_cas_upload_workers": push.get("native_cas_upload_workers"),
             "initial_revision": before.sha,
             "commit_oid": commit_oid,
             "commit_url": push.get("commit_url"),

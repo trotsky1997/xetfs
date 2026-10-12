@@ -15,10 +15,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     env,
     io::Read,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,6 +33,7 @@ const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const TOKEN_REFRESH_SKEW: u64 = 30;
 const CAS_UPLOAD_MAX_ATTEMPTS: usize = 4;
 const CAS_ERROR_BODY_LIMIT: u64 = 4096;
+const MAX_PARALLEL_XORB_UPLOAD_BYTES: usize = 128 * 1024 * 1024;
 const FILE_FLAG_WITH_VERIFICATION: u32 = 1 << 31;
 const FILE_FLAG_WITH_METADATA_EXT: u32 = 1 << 30;
 const SHARD_HEADER_TAG: [u8; 32] = [
@@ -49,7 +54,7 @@ struct PreuploadFile {
     upload_mode: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CasToken {
     access_token: String,
@@ -101,6 +106,11 @@ struct CasChunkInfo {
     len: u32,
 }
 
+struct PendingXorb {
+    id: String,
+    xorb: UploadXorb,
+}
+
 pub(super) fn push(
     fs: &FileSystem,
     repo_id: &str,
@@ -108,8 +118,13 @@ pub(super) fn push(
     revision: &str,
     prefix: Option<&str>,
     commit_message: &str,
+    workers: usize,
 ) -> anyhow::Result<PushReport> {
     validate_prefix(prefix)?;
+    anyhow::ensure!(
+        (1..=64).contains(&workers),
+        "native CAS upload workers must be between 1 and 64"
+    );
     // Preserve the upstream streaming path for unflushed handles. The direct
     // CAS path below consumes immutable repository Xorbs without rechunking.
     let _repo = open_repo(repo_id, repo_type)?;
@@ -155,35 +170,58 @@ pub(super) fn push(
         return super::push_official(fs, repo_id, repo_type, revision, prefix, commit_message);
     }
 
-    let mut operations = Vec::with_capacity(sources.len());
-    let mut xet_token: Option<CasToken> = None;
-    let mut uploaded_xorbs = HashSet::new();
-    let mut xorb_metadata = HashMap::new();
-    let mut bytes_uploaded = 0u64;
-
+    let mut manifests = Vec::with_capacity(sources.len());
+    let mut xorb_ids = BTreeSet::new();
     for source in &sources {
-        let relative = source.local.repo_path.trim_start_matches('/');
-        validate_repo_path(relative)?;
         let mode = modes
             .get(&source.local.repo_path)
             .map(String::as_str)
             .unwrap_or("regular");
         if mode == "lfs" && source.local.size > 0 {
             let manifest = build_manifest(source)?;
-            let cas_infos = upload_file_xorbs(
-                fs,
-                &client,
-                &endpoint,
-                &token,
-                repo_id,
-                repo_type,
-                revision,
-                &manifest,
-                &mut xet_token,
-                &mut uploaded_xorbs,
-                &mut xorb_metadata,
-            )?;
-            validate_manifest_xorbs(&manifest, &cas_infos)?;
+            xorb_ids.extend(
+                manifest
+                    .terms
+                    .iter()
+                    .map(|term| hash::to_hex(&term.xorb_hash)),
+            );
+            manifests.push(Some(manifest));
+        } else {
+            manifests.push(None);
+        }
+    }
+
+    // Validate every local Xorb and file recipe before the first remote write.
+    let xorb_metadata = load_xorb_metadata(fs, &xorb_ids)?;
+    for manifest in manifests.iter().flatten() {
+        let cas_infos = manifest_xorb_infos(manifest, &xorb_metadata)?;
+        validate_manifest_xorbs(manifest, &cas_infos)?;
+    }
+
+    // CAS objects are content-addressed and independent across files. Upload
+    // them in bounded parallel batches before writing the per-file shards.
+    let mut xet_token: Option<CasToken> = None;
+    upload_xorbs(
+        fs,
+        &client,
+        &endpoint,
+        &token,
+        repo_id,
+        repo_type,
+        revision,
+        &xorb_ids,
+        &xorb_metadata,
+        &mut xet_token,
+        workers,
+    )?;
+
+    let mut operations = Vec::with_capacity(sources.len());
+    let mut bytes_uploaded = 0u64;
+    for (source, manifest) in sources.iter().zip(manifests) {
+        let relative = source.local.repo_path.trim_start_matches('/');
+        validate_repo_path(relative)?;
+        if let Some(manifest) = manifest {
+            let cas_infos = manifest_xorb_infos(&manifest, &xorb_metadata)?;
             let shard = serialize_upload_shard(&manifest, &cas_infos)?;
             let token = ensure_write_token(
                 &client,
@@ -242,6 +280,7 @@ pub(super) fn push(
         files_uploaded: sources.len() as u64,
         symlinks_skipped: skipped_symlinks,
         bytes_uploaded,
+        native_cas_upload_workers: Some(workers),
         commit_oid: commit.commit_oid,
         commit_url: commit.commit_url,
     })
@@ -364,8 +403,40 @@ fn build_manifest(source: &Source) -> anyhow::Result<FileManifest> {
     })
 }
 
+fn load_xorb_metadata(
+    fs: &FileSystem,
+    ids: &BTreeSet<String>,
+) -> anyhow::Result<HashMap<String, CasXorbInfo>> {
+    ids.iter()
+        .map(|id| {
+            let xorb = fs.repository().read_upload_xorb(id)?;
+            anyhow::ensure!(hash::to_hex(&xorb.hash) == *id, "local Xorb key mismatch");
+            Ok((id.clone(), cas_info(&xorb)?))
+        })
+        .collect()
+}
+
+fn manifest_xorb_infos(
+    manifest: &FileManifest,
+    metadata: &HashMap<String, CasXorbInfo>,
+) -> anyhow::Result<Vec<CasXorbInfo>> {
+    manifest
+        .terms
+        .iter()
+        .map(|term| hash::to_hex(&term.xorb_hash))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| {
+            metadata
+                .get(&id)
+                .cloned()
+                .with_context(|| format!("missing local CAS metadata for Xorb {id}"))
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
-fn upload_file_xorbs(
+fn upload_xorbs(
     fs: &FileSystem,
     client: &Client,
     endpoint: &str,
@@ -373,33 +444,135 @@ fn upload_file_xorbs(
     repo_id: &str,
     repo_type: &str,
     revision: &str,
-    manifest: &FileManifest,
+    ids: &BTreeSet<String>,
+    metadata: &HashMap<String, CasXorbInfo>,
     cas_token: &mut Option<CasToken>,
-    uploaded_xorbs: &mut HashSet<String>,
-    metadata_cache: &mut HashMap<String, CasXorbInfo>,
-) -> anyhow::Result<Vec<CasXorbInfo>> {
-    let mut result = Vec::new();
-    let ids: BTreeSet<String> = manifest
-        .terms
-        .iter()
-        .map(|term| hash::to_hex(&term.xorb_hash))
-        .collect();
+    workers: usize,
+) -> anyhow::Result<()> {
+    let mut pending = Vec::new();
+    let mut pending_bytes = 0usize;
     for id in ids {
-        if !metadata_cache.contains_key(&id) {
-            let xorb = fs.repository().read_upload_xorb(&id)?;
-            anyhow::ensure!(hash::to_hex(&xorb.hash) == id, "local Xorb key mismatch");
-            let info = cas_info(&xorb)?;
-            let token = ensure_write_token(
-                client, endpoint, hub_token, repo_id, repo_type, revision, cas_token,
+        let expected_bytes = metadata
+            .get(id)
+            .with_context(|| format!("missing local CAS metadata for Xorb {id}"))?
+            .disk_bytes as usize;
+        if !pending.is_empty()
+            && (pending.len() >= workers
+                || pending_bytes.saturating_add(expected_bytes) > MAX_PARALLEL_XORB_UPLOAD_BYTES)
+        {
+            upload_xorb_batch(
+                std::mem::take(&mut pending),
+                client,
+                endpoint,
+                hub_token,
+                repo_id,
+                repo_type,
+                revision,
+                cas_token,
+                workers,
             )?;
-            if uploaded_xorbs.insert(id.clone()) {
-                upload_xorb(client, token, xorb)?;
-            }
-            metadata_cache.insert(id.clone(), info);
+            pending_bytes = 0;
         }
-        result.push(metadata_cache[&id].clone());
+
+        let xorb = fs.repository().read_upload_xorb(id)?;
+        anyhow::ensure!(hash::to_hex(&xorb.hash) == *id, "local Xorb key mismatch");
+        anyhow::ensure!(
+            xorb.bytes.len() == expected_bytes,
+            "local Xorb size changed after validation for {id}"
+        );
+        pending_bytes = pending_bytes.saturating_add(expected_bytes);
+        pending.push(PendingXorb {
+            id: id.clone(),
+            xorb,
+        });
     }
-    Ok(result)
+    upload_xorb_batch(
+        pending, client, endpoint, hub_token, repo_id, repo_type, revision, cas_token, workers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_xorb_batch(
+    batch: Vec<PendingXorb>,
+    client: &Client,
+    endpoint: &str,
+    hub_token: &str,
+    repo_id: &str,
+    repo_type: &str,
+    revision: &str,
+    cas_token: &mut Option<CasToken>,
+    workers: usize,
+) -> anyhow::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let token = ensure_write_token(
+        client, endpoint, hub_token, repo_id, repo_type, revision, cas_token,
+    )?
+    .clone();
+    upload_bounded(batch, workers, |pending| {
+        upload_xorb(client, &token, pending.xorb)
+            .with_context(|| format!("upload Xet CAS Xorb {}", pending.id))
+    })
+}
+
+fn upload_bounded<T, F>(items: Vec<T>, workers: usize, upload: F) -> anyhow::Result<()>
+where
+    T: Send,
+    F: Fn(T) -> anyhow::Result<()> + Sync,
+{
+    anyhow::ensure!(workers > 0, "upload workers must be greater than zero");
+    if items.is_empty() {
+        return Ok(());
+    }
+    let worker_count = workers.min(items.len());
+    let queue = Mutex::new(VecDeque::from(items));
+    let first_error = Mutex::new(None::<anyhow::Error>);
+    let stopped = AtomicBool::new(false);
+    let mut worker_panicked = false;
+
+    thread::scope(|scope| {
+        let handles = (0..worker_count)
+            .map(|_| {
+                scope.spawn(|| {
+                    loop {
+                        if stopped.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let item = queue.lock().expect("upload queue poisoned").pop_front();
+                        let Some(item) = item else {
+                            break;
+                        };
+                        if let Err(error) = upload(item) {
+                            stopped.store(true, Ordering::Release);
+                            if let Ok(mut first) = first_error.lock()
+                                && first.is_none()
+                            {
+                                *first = Some(error);
+                            }
+                            break;
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            if handle.join().is_err() {
+                stopped.store(true, Ordering::Release);
+                worker_panicked = true;
+            }
+        }
+    });
+
+    if let Some(error) = first_error
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("upload error state poisoned"))?
+    {
+        return Err(error);
+    }
+    anyhow::ensure!(!worker_panicked, "Xet CAS upload worker panicked");
+    Ok(())
 }
 
 fn cas_info(xorb: &UploadXorb) -> anyhow::Result<CasXorbInfo> {
@@ -831,7 +1004,48 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{
+        io::Cursor,
+        sync::{Arc, Barrier, atomic::AtomicUsize},
+    };
+
+    #[test]
+    fn xorb_upload_scheduler_runs_concurrently_with_a_fixed_bound() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let start_together = Arc::new(Barrier::new(3));
+        upload_bounded(vec![0; 9], 3, {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            let completed = Arc::clone(&completed);
+            let start_together = Arc::clone(&start_together);
+            move |_| {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(count, Ordering::SeqCst);
+                start_together.wait();
+                thread::sleep(Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(completed.load(Ordering::SeqCst), 9);
+        assert_eq!(maximum.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn xorb_upload_scheduler_propagates_worker_errors() {
+        let result = upload_bounded(vec![0, 1, 2, 3], 4, |item| {
+            if item == 0 {
+                bail!("injected upload failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+    }
 
     #[test]
     fn upload_shard_roundtrips_with_official_reader() {
