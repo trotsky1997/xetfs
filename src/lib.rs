@@ -6,6 +6,7 @@ mod filesystem;
 pub mod fuse;
 pub mod hash;
 pub mod remote;
+pub mod remote_cas;
 mod repository;
 pub mod xorb;
 

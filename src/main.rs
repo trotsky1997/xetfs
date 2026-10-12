@@ -144,6 +144,24 @@ enum RemoteCommand {
         #[arg(long, default_value_t = 8, value_parser = parse_workers)]
         workers: usize,
     },
+    /// Read a byte range directly from the Hugging Face Xet CAS to stdout.
+    Cat {
+        #[command(flatten)]
+        hub: HubFileArgs,
+        /// Start offset in bytes.
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        /// Number of bytes to read (maximum 64 MiB per request).
+        #[arg(long, default_value_t = 1024 * 1024)]
+        length: u64,
+        /// Maximum number of concurrent signed Xorb range requests (1-64).
+        #[arg(
+            long,
+            default_value_t = xetfs::remote_cas::DEFAULT_CAS_WORKERS,
+            value_parser = parse_workers
+        )]
+        workers: usize,
+    },
     /// Upload this local namespace as one Hub commit.
     Push {
         #[command(flatten)]
@@ -166,6 +184,19 @@ struct HubArgs {
     /// Optional repository-relative directory. Pull preserves this prefix locally.
     #[arg(long)]
     prefix: Option<String>,
+}
+#[derive(Args)]
+struct HubFileArgs {
+    /// Hugging Face repository id, such as owner/name.
+    repo_id: String,
+    /// Repository-relative file path.
+    file_path: String,
+    /// Hugging Face repository kind.
+    #[arg(long, value_enum, default_value = "model")]
+    repo_type: HubRepoType,
+    /// Hub branch, tag, or commit SHA.
+    #[arg(long, default_value = "main")]
+    revision: String,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum HubRepoType {
@@ -284,6 +315,27 @@ fn main() -> Result<()> {
         Command::Init => {
             let repo = Repository::init(&cli.repo)?;
             return json(&serde_json::json!({"repository":repo.path(),"format_version":1}));
+        }
+        Command::Remote {
+            command:
+                RemoteCommand::Cat {
+                    hub,
+                    offset,
+                    length,
+                    workers,
+                },
+        } => {
+            let bytes = xetfs::remote_cas::read_range_with_workers(
+                &hub.repo_id,
+                hub.repo_type.as_str(),
+                &hub.revision,
+                &hub.file_path,
+                *offset,
+                *length,
+                *workers,
+            )?;
+            io::stdout().lock().write_all(&bytes)?;
+            return Ok(());
         }
         _ => (),
     }
@@ -467,6 +519,9 @@ fn main() -> Result<()> {
                 force,
                 workers,
             )?)?,
+            RemoteCommand::Cat { .. } => {
+                unreachable!("remote cat is handled before opening a local repository")
+            }
             RemoteCommand::Push { hub, message } => json(&xetfs::remote::push(
                 &fs,
                 &hub.repo_id,

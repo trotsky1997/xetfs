@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "source_revision": "3e8822217df4dcf4f5f8b199b7c4f4accf025b35-default-one-worker-and-bounded-cas",
+  "binary_sha256": "a08d344aafd7d27f0872688e638d0b41ec6b19fcdfc54d6962dc118eef28cbc4",
+  "repository": "xet-team/xet-spec-reference-files",
+  "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "file_path": "Electric_Vehicle_Population_Data_20250917.csv",
+  "read_path": "Hub file metadata + Xet read token + CAS v2 reconstruction + signed Xorb ranges",
+  "full_file": {
+    "bytes": 63527244,
+    "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+    "xet_file_hash_checked_by_client": true,
+    "seconds": 3.495050625
+  },
+  "range": {
+    "offset": 1048576,
+    "bytes": 65536,
+    "seconds": 2.262065792,
+    "matches_full_file_slice": true
+  }
+}

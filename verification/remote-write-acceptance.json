@@ -1,0 +1,49 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "source_revision": "3e8822217df4dcf4f5f8b199b7c4f4accf025b35-plus-direct-cas-before-parallel-range-fetch",
+  "binary_sha256": "af0e8d4f6280b5ae79dd7960bb9ac0ae1701a8832639647f2f30cddf4ba21301",
+  "repository": "di-zhang-fdu/xet-debug",
+  "repository_private": false,
+  "initial_revision": "4e32387a407ca6c6b73c95eeffafcc58dfbe1dd8",
+  "commit_oid": "21ee4d72715d98f60eb97ebb9c88cf4104990088",
+  "commit_url": "https://huggingface.co/datasets/di-zhang-fdu/xet-debug/commit/21ee4d72715d98f60eb97ebb9c88cf4104990088",
+  "path": "xetfs-acceptance/20261012T050321Z-a9a4e772bb/payload.bin",
+  "bytes": 12582912,
+  "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+  "local_fsck": {
+    "xorbs_verified": 1,
+    "chunks_verified": 200,
+    "recipes_verified": 1
+  },
+  "remote_file_size": 12582912,
+  "direct_cas_readback": {
+    "passed": true,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+    "client_checked_xet_file_hash": true
+  },
+  "official_hf_download_readback": {
+    "passed": true,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a"
+  },
+  "parallel_worker_readback": {
+    "passed": true,
+    "binary_sha256": "8345cd9ccf8fec5494b4750e578b0474f72ab80eaaca928fd1c8c60b62948695",
+    "workers": 8,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+    "xet_file_hash_checked_by_client": true
+  },
+  "current_default_readback": {
+    "passed": true,
+    "binary_sha256": "a08d344aafd7d27f0872688e638d0b41ec6b19fcdfc54d6962dc118eef28cbc4",
+    "workers": 1,
+    "bytes": 12582912,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+    "xet_file_hash_checked_by_client": true
+  }
+}
