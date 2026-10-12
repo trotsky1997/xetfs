@@ -1,5 +1,7 @@
 use crate::{
-    DirEntry, Error, GcReport, Kind, Node, Repository, Result, error::errno, repository::now_ns,
+    DirEntry, Error, GcReport, Kind, Node, Repository, Result,
+    error::errno,
+    repository::{UploadSnapshot, now_ns},
 };
 use rusqlite::{OptionalExtension, params};
 use std::{
@@ -648,6 +650,25 @@ impl FileSystem {
                 size,
             )
         }
+    }
+
+    pub(crate) fn upload_snapshot(&self, ino: u64) -> Result<UploadSnapshot> {
+        let node = self.node(ino)?;
+        if node.kind != Kind::File {
+            return errno(libc::EISDIR);
+        }
+        if let Some(stage) = self.stages.get(&ino) {
+            return Ok(UploadSnapshot::staged(
+                stage.file.as_file().try_clone()?,
+                node.size,
+            ));
+        }
+        self.repo.upload_snapshot(
+            node.content
+                .as_deref()
+                .ok_or_else(|| Error::Corrupt("file has no recipe".into()))?,
+            node.size,
+        )
     }
     pub fn read_handle(&self, fh: u64, offset: u64, size: usize) -> Result<Vec<u8>> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;

@@ -21,8 +21,10 @@ flowchart LR
   I --> K
   K --> D
   L[Hugging Face Hub] <--> M[remote.rs / hf-hub / hf-xet]
-  M <--> N[临时传输文件]
-  N <--> D
+  M --> N[pull: 临时下载文件]
+  N --> D
+  D --> Q[push: 可重读 Xorb/写暂存流]
+  Q --> M
   L --> O[remote_cas.rs / reconstruction + signed Xorb ranges]
   O --> P[远程范围字节]
 ```
@@ -106,7 +108,7 @@ GC 的根包括当前 inode 和快照 inode。删除配方与块索引后，完�
 
 `fsck` 检查 SQLite 完整性、外键、物理 Xorb 内容与哈希、块索引、文件配方偏移及根哈希、inode 长度与主要 namespace/snapshot 约束。它检测问题并返回错误，不自动修复数据。
 
-`remote pull` 固定读取请求的 Hub revision，将匹配的目录树下载到临时目录，检查文件长度后逐项导入本地文件系统。`remote push` 逐文件读取所选本地路径到临时文件，再以一次 Hub commit 上传。push 是文件 upsert，不镜像删除；远程与本地的 revision 不额外记录在 SQLite 中。
+`remote pull` 固定读取请求的 Hub revision，将匹配的目录树下载到临时目录，检查文件长度后逐项导入本地文件系统。`remote push` 为每个文件建立可重读快照流：已提交文件直接解码不可变 Xorb 记录，仍打开写句柄的文件从克隆的暂存文件描述符读取；之后由 `hf-hub`/`hf-xet` 执行授权、Xet CAS 上传与 Hub commit。该路径省去每个文件的第二份完整临时副本。push 是文件 upsert，不镜像删除；远程与本地的 revision 不额外记录在 SQLite 中。
 
 `remote cat` 用 Hub file metadata 找到目标文件哈希后，直接按字节范围请求 Xet CAS reconstruction 和签名 Xorb ranges；每次输出最多 64 MiB，适用于模型权重头部探测、索引读取和远程抽样。该命令输出原始字节，不修改本地 CAS。
 

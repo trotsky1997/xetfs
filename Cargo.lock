@@ -3305,9 +3305,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "bytes",
  "clap",
  "fs2",
  "fuser",
+ "futures-util",
  "gearhash",
  "globset",
  "hf-hub",

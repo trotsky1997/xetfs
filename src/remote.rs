@@ -6,11 +6,16 @@
 
 use crate::{Error, FileSystem, Kind, Node, Result};
 use anyhow::{Context, bail};
-use hf_hub::{HFClientSync, HFRepositorySync, RepoTypeAny, repository::CommitOperation, split_id};
+use futures_util::stream;
+use hf_hub::{
+    HFClientSync, HFError, HFRepositorySync, RepoTypeAny,
+    repository::{AddSource, CommitOperation, SourceByteStream, StreamFactory, StreamSource},
+    split_id,
+};
 use std::{
     fs::{self, File},
-    io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const IO_BLOCK: usize = 1024 * 1024;
@@ -248,6 +253,35 @@ struct LocalFile {
     size: u64,
 }
 
+struct XetFsStreamFactory {
+    snapshot: Arc<crate::repository::UploadSnapshot>,
+}
+
+impl StreamFactory for XetFsStreamFactory {
+    fn open(&self) -> SourceByteStream {
+        let snapshot = self.snapshot.clone();
+        Box::pin(stream::try_unfold(
+            (snapshot, 0u64),
+            |(snapshot, offset)| async move {
+                if offset >= snapshot.size() {
+                    return Ok(None);
+                }
+                let length = (snapshot.size() - offset).min(IO_BLOCK as u64) as usize;
+                let bytes = snapshot
+                    .read_at(offset, length)
+                    .map_err(|error| HFError::Io(std::io::Error::other(error)))?;
+                if bytes.len() != length {
+                    return Err(HFError::Io(std::io::Error::other(
+                        "local XetFS stream ended before its recorded size",
+                    )));
+                }
+                let next = offset + bytes.len() as u64;
+                Ok(Some((bytes::Bytes::from(bytes), (snapshot, next))))
+            },
+        ))
+    }
+}
+
 fn collect_local_files(
     fs: &FileSystem,
     node: Node,
@@ -312,30 +346,23 @@ pub fn push(
         bail!("there are no regular files to upload");
     }
 
-    let staging = tempfile::tempdir().context("create temporary Hub upload directory")?;
     let mut operations = Vec::with_capacity(local_files.len());
     let mut bytes_uploaded = 0u64;
-    for (index, entry) in local_files.iter().enumerate() {
+    for entry in &local_files {
         let relative = entry.repo_path.trim_start_matches('/');
         validate_repo_path(relative)?;
-        let staged_path = staging.path().join(format!("file-{index:08}"));
-        let mut output = File::create(&staged_path)
-            .with_context(|| format!("create staged upload for {}", entry.repo_path))?;
-        let mut offset = 0u64;
-        while offset < entry.size {
-            let remaining = (entry.size - offset).min(IO_BLOCK as u64) as usize;
-            let bytes = fs.read_inode(entry.inode, offset, remaining)?;
-            if bytes.is_empty() {
-                bail!(
-                    "local file {} ended before its recorded size",
-                    entry.repo_path
-                );
-            }
-            output.write_all(&bytes)?;
-            offset += bytes.len() as u64;
+        let snapshot = Arc::new(fs.upload_snapshot(entry.inode)?);
+        if snapshot.size() != entry.size {
+            bail!(
+                "local file {} changed while preparing upload",
+                entry.repo_path
+            );
         }
-        output.sync_all()?;
-        operations.push(CommitOperation::add_file(relative, staged_path));
+        let source = StreamSource::new(Arc::new(XetFsStreamFactory { snapshot }), entry.size);
+        operations.push(CommitOperation::Add {
+            path_in_repo: relative.to_owned(),
+            source: AddSource::stream(source),
+        });
         bytes_uploaded = bytes_uploaded.saturating_add(entry.size);
     }
 
@@ -356,4 +383,70 @@ pub fn push(
         commit_oid: result.commit_oid,
         commit_url: result.commit_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Repository;
+    use std::{
+        io::Cursor,
+        task::{Context, Poll, Waker},
+    };
+
+    fn collect_ready_stream(mut source: SourceByteStream) -> hf_hub::HFResult<Vec<u8>> {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut output = Vec::new();
+        loop {
+            match source.as_mut().poll_next(&mut context) {
+                Poll::Ready(Some(Ok(bytes))) => output.extend_from_slice(&bytes),
+                Poll::Ready(Some(Err(error))) => return Err(error),
+                Poll::Ready(None) => return Ok(output),
+                Poll::Pending => panic!("local XetFS stream unexpectedly blocked"),
+            }
+        }
+    }
+
+    #[test]
+    fn upload_stream_reopens_committed_and_staged_xetfs_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = Repository::init(temp.path()).unwrap();
+        let mut filesystem = FileSystem::new(repository);
+        let original: Vec<u8> = (0..350_000)
+            .map(|i| ((i * 73 + i / 11) % 251) as u8)
+            .collect();
+        let committed = filesystem
+            .put_file("/committed.bin", Cursor::new(&original))
+            .unwrap();
+        let committed_factory = XetFsStreamFactory {
+            snapshot: Arc::new(filesystem.upload_snapshot(committed.ino).unwrap()),
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                collect_ready_stream(committed_factory.open()).unwrap(),
+                original
+            );
+        }
+
+        let staged = filesystem
+            .put_file("/staged.bin", Cursor::new(&original))
+            .unwrap();
+        let handle = filesystem.open_handle(staged.ino, libc::O_RDWR).unwrap();
+        filesystem
+            .write_handle(handle, 123_456, b"XetFS streaming upload")
+            .unwrap();
+        let mut expected = original;
+        expected[123_456..123_456 + b"XetFS streaming upload".len()]
+            .copy_from_slice(b"XetFS streaming upload");
+        let staged_factory = XetFsStreamFactory {
+            snapshot: Arc::new(filesystem.upload_snapshot(staged.ino).unwrap()),
+        };
+        for _ in 0..3 {
+            assert_eq!(
+                collect_ready_stream(staged_factory.open()).unwrap(),
+                expected
+            );
+        }
+    }
 }

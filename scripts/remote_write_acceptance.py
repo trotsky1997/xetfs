@@ -177,6 +177,8 @@ def main() -> None:
             "binary_sha256": sha256(binary),
             "repository": args.repo_id,
             "repository_private": before.private,
+            "upload_source_strategy": "re-readable XetFS snapshot stream from CAS or an open write stage",
+            "xetfs_full_file_staging_bytes": 0,
             "initial_revision": before.sha,
             "commit_oid": commit_oid,
             "commit_url": push.get("commit_url"),

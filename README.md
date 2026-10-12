@@ -60,7 +60,7 @@ $XETFS_BIN --repo ./demo.repo mv /models/copy.txt /models/renamed.txt
 
 ## Hugging Face Hub 远程读写
 
-先用 Hugging Face CLI 登录，或按 `hf-hub` 的标准方式提供 `HF_TOKEN`。读取私有仓库需要 read 权限；上传需要 write 权限。`remote pull` 按指定 revision 下载 Xet 文件并导入本地 CAS，`remote push` 将本地文件导出到临时目录，再通过官方 Xet 客户端上传并写入一个 Hub commit：
+先用 Hugging Face CLI 登录，或按 `hf-hub` 的标准方式提供 `HF_TOKEN`。读取私有仓库需要 read 权限；上传需要 write 权限。`remote pull` 按指定 revision 下载 Xet 文件并导入本地 CAS，`remote push` 从本地不可变 CAS 配方或打开文件的暂存描述符创建可重读流，交给 Hugging Face Xet 客户端上传并写入一个 Hub commit，不再额外落盘复制完整文件：
 
 ```sh
 hf auth login
@@ -81,7 +81,7 @@ pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 �
 
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
 
-Hub 客户端负责授权、Xet CAS 传输和 Hub commit 格式。Hub 判定为 Xet/LFS 的文件经 Xet shard/CAS 路径上传；其他小文件按 Hub 的常规 inline 路径处理。XetFS 使用本地 Xet 算法重新摄取下载字节，并把本地文件内容交给官方客户端上传；本地 SQLite 仓库格式不会直接作为 Hub shard 上传。
+Hub 客户端负责授权、Xet CAS 传输和 Hub commit 格式。Hub 判定为 Xet/LFS 的文件经 Xet shard/CAS 路径上传；其他小文件按 Hub 的常规 inline 路径处理。XetFS 使用本地 Xet 算法重新摄取下载字节，并从本地配方流式提供上传内容；本地 SQLite 仓库格式不会直接作为 Hub shard 上传。
 
 ## 挂载
 
@@ -131,7 +131,7 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 ## 当前边界
 
-- Hub 同步目前通过显式 `remote pull` / `remote push` 工作，不提供 Hub 文件的按需远程挂载、双向变更检测或删除镜像。每次传输会在宿主机临时目录暂存文件，峰值临时空间可能接近待传输数据总量。
+- Hub 同步目前通过显式 `remote pull` / `remote push` 工作，不提供 Hub 文件的按需远程挂载、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
 - 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。

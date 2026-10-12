@@ -11,7 +11,9 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
+    os::unix::fs::FileExt as UnixFileExt,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -137,6 +139,114 @@ pub struct Repository {
     pub(crate) root: PathBuf,
     _lock: File,
 }
+
+/// Stable, re-readable view of one inode's bytes for remote upload.
+///
+/// Committed files read immutable chunk records directly from the local CAS;
+/// open write handles read from a cloned descriptor for their staging file.
+#[derive(Clone)]
+pub(crate) struct UploadSnapshot {
+    size: u64,
+    source: UploadSnapshotSource,
+}
+
+#[derive(Clone)]
+enum UploadSnapshotSource {
+    Staged(Arc<File>),
+    Cas { chunks: Arc<[UploadChunk]> },
+}
+
+#[derive(Clone)]
+struct UploadChunk {
+    file_offset: u64,
+    len: u64,
+    hash: String,
+    object: PathBuf,
+    object_offset: u64,
+    stored: u64,
+}
+
+impl UploadSnapshot {
+    pub(crate) fn staged(file: File, size: u64) -> Self {
+        Self {
+            size,
+            source: UploadSnapshotSource::Staged(Arc::new(file)),
+        }
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub(crate) fn read_at(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
+        if offset >= self.size || size == 0 {
+            return Ok(Vec::new());
+        }
+        let length = (self.size - offset).min(size as u64) as usize;
+        if let UploadSnapshotSource::Staged(file) = &self.source {
+            let mut bytes = vec![0; length];
+            file.read_exact_at(&mut bytes, offset)?;
+            return Ok(bytes);
+        }
+
+        let UploadSnapshotSource::Cas { chunks } = &self.source else {
+            unreachable!();
+        };
+        let end = offset + length as u64;
+        let mut output = Vec::with_capacity(length);
+        let mut index = chunks.partition_point(|chunk| chunk.file_offset + chunk.len <= offset);
+        while let Some(chunk) = chunks.get(index) {
+            if chunk.file_offset >= end {
+                break;
+            }
+            let chunk_end = chunk
+                .file_offset
+                .checked_add(chunk.len)
+                .ok_or_else(|| Error::Corrupt("upload snapshot chunk range overflow".into()))?;
+            if chunk_end <= offset || chunk.file_offset >= end {
+                continue;
+            }
+            let data = read_chunk_record(
+                &chunk.object,
+                chunk.object_offset,
+                chunk.len,
+                chunk.stored,
+                &chunk.hash,
+            )?;
+            let from = offset.saturating_sub(chunk.file_offset) as usize;
+            let to = (end - chunk.file_offset).min(chunk.len) as usize;
+            output.extend_from_slice(&data[from..to]);
+            index += 1;
+        }
+        if output.len() != length {
+            return Err(Error::Corrupt("incomplete upload snapshot read".into()));
+        }
+        Ok(output)
+    }
+}
+
+fn read_chunk_record(
+    path: &Path,
+    offset: u64,
+    len: u64,
+    stored: u64,
+    expected_hash: &str,
+) -> Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let (data, consumed) =
+        xorb::decode(&mut file)?.ok_or_else(|| Error::Corrupt("missing chunk".into()))?;
+    if data.len() as u64 != len
+        || consumed != stored
+        || hash::to_hex(&hash::chunk_hash(&data)) != expected_hash
+    {
+        return Err(Error::Corrupt(format!(
+            "chunk integrity failed: {expected_hash}"
+        )));
+    }
+    Ok(data)
+}
+
 #[derive(Default)]
 struct Pack {
     bytes: Vec<u8>,
@@ -194,17 +304,13 @@ fn read_chunk(conn: &Connection, root: &Path, hex: &str) -> Result<Vec<u8>> {
         "SELECT p.xorb,p.offset,p.len,p.stored FROM chunks c JOIN xorb_chunks p ON p.xorb=c.xorb AND p.idx=c.idx WHERE c.hash=?1",
         [hex], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     hash::from_hex(&object)?;
-    let mut file = File::open(root.join("objects").join(format!("{object}.xorb")))?;
-    file.seek(SeekFrom::Start(offset))?;
-    let (data, consumed) =
-        xorb::decode(&mut file)?.ok_or_else(|| Error::Corrupt("missing chunk".into()))?;
-    if data.len() as u64 != len
-        || consumed != stored
-        || hash::to_hex(&hash::chunk_hash(&data)) != hex
-    {
-        return Err(Error::Corrupt(format!("chunk integrity failed: {hex}")));
-    }
-    Ok(data)
+    read_chunk_record(
+        &root.join("objects").join(format!("{object}.xorb")),
+        offset,
+        len,
+        stored,
+        hex,
+    )
 }
 impl Repository {
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
@@ -358,6 +464,69 @@ impl Repository {
             return Err(Error::Corrupt("incomplete file reconstruction".into()));
         }
         Ok(out)
+    }
+
+    pub(crate) fn upload_snapshot(&self, id: &str, expected_size: u64) -> Result<UploadSnapshot> {
+        let size: u64 =
+            self.conn
+                .query_row("SELECT size FROM contents WHERE id=?1", [id], |r| r.get(0))?;
+        if size != expected_size {
+            return Err(Error::Corrupt(format!(
+                "upload snapshot size changed: expected {expected_size}, found {size}"
+            )));
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT f.offset,f.len,f.hash,c.xorb,p.offset,p.stored \
+             FROM file_chunks f \
+             JOIN chunks c ON c.hash=f.hash \
+             JOIN xorb_chunks p ON p.xorb=c.xorb AND p.idx=c.idx \
+             WHERE f.content=?1 ORDER BY f.idx",
+        )?;
+        let rows = statement.query_map([id], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, u64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
+            ))
+        })?;
+
+        let mut chunks = Vec::new();
+        let mut next_offset = 0u64;
+        for row in rows {
+            let (file_offset, len, chunk_hash, object_hash, object_offset, stored) = row?;
+            if file_offset != next_offset || len == 0 {
+                return Err(Error::Corrupt(format!("invalid upload recipe for {id}")));
+            }
+            hash::from_hex(&chunk_hash)?;
+            hash::from_hex(&object_hash)?;
+            next_offset = next_offset
+                .checked_add(len)
+                .ok_or_else(|| Error::Corrupt("upload recipe size overflow".into()))?;
+            chunks.push(UploadChunk {
+                file_offset,
+                len,
+                hash: chunk_hash,
+                object: self
+                    .root
+                    .join("objects")
+                    .join(format!("{object_hash}.xorb")),
+                object_offset,
+                stored,
+            });
+        }
+        if next_offset != size {
+            return Err(Error::Corrupt(format!("incomplete upload recipe for {id}")));
+        }
+        Ok(UploadSnapshot {
+            size,
+            source: UploadSnapshotSource::Cas {
+                chunks: Arc::from(chunks),
+            },
+        })
     }
     pub fn export_content(&self, id: &str, mut output: impl Write) -> Result<()> {
         self.conn
