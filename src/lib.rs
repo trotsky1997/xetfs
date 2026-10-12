@@ -7,6 +7,8 @@ pub mod fuse;
 pub mod hash;
 pub mod remote;
 pub mod remote_cas;
+#[cfg(all(target_os = "linux", feature = "fuse"))]
+pub mod remote_fuse;
 mod repository;
 pub mod xorb;
 

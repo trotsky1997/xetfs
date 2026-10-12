@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Linux",
+    "release": "7.0.12-linuxkit",
+    "architecture": "aarch64"
+  },
+  "repository": "di-zhang-fdu/xet-debug",
+  "repository_type": "dataset",
+  "revision": "f9106589e55cba3714851199079839da882e1a4e",
+  "binary_sha256": "97c7256ec4f30f965dea0a7b708d35f0b859d4e59434f7e971e858c573b5f18d",
+  "path": "xetfs-acceptance/20261012T062435Z-81525fbf2e/payload.bin",
+  "file_bytes": 12582912,
+  "reference_sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+  "range_read": {
+    "offset": 6291593,
+    "bytes": 65536,
+    "sha256": "ae071b4c6e93760202fbf7f47142d714f4c7821d8bde526ced1eb11f89aa7a9f",
+    "elapsed_seconds": 2.330057001000114,
+    "aligned_window_bytes": 4194304,
+    "window_size_bytes": 4194304,
+    "fraction_of_file_windowed": 0.3333333333333333
+  },
+  "read_only_enforced": true,
+  "write_open_errno": 30,
+  "cache_limit_bytes": 4194304,
+  "network_wire_bytes_measured": false
+}

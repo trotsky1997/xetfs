@@ -31,6 +31,9 @@ flowchart LR
   T --> L
   L --> O[remote_cas.rs / reconstruction + signed Xorb ranges]
   O --> P[远程范围字节]
+  L --> U[remote_fuse.rs: 只读远程 FUSE]
+  U --> V[4 MiB 窗口 LRU]
+  V --> O
 ```
 
 ## 模块
@@ -45,6 +48,7 @@ flowchart LR
 | `remote.rs` | Hub revision 枚举、官方客户端拉取、写入 fallback 与本地/远端路径映射 |
 | `remote/push_native.rs` | 已提交文件的 Hub preupload、Xet write token、原始 Xorb CAS 上传、MDB shard 编码和 Hub LFS commit |
 | `remote_cas.rs` | Hub 文件元数据、读 token、v1/v2 CAS reconstruction、有界并发 signed multi-range Xorb 下载与范围重建，以及 Hub API URL/token 辅助 |
+| `remote_fuse.rs` | Linux 只读远程挂载：revision 文件树、Xet 文件 inode、固定窗口 LRU 与按需 CAS 范围读取 |
 | `fuse.rs` | Linux FUSE 回调、属性映射、稳定目录句柄与内核权限选项 |
 | `main.rs` | 管理、导入导出、范围读取、哈希、远程同步和挂载命令 |
 
@@ -59,6 +63,8 @@ Xorb 使用 [v0 块记录格式](https://huggingface.co/docs/xet/en/xorb)：版�
 本地对象是无 footer 的块流。`inspect-xorb` 还接受官方固定样本实际包含的 `XETB` 末尾标记，且要求标记后立即 EOF；不把该观察扩展为对所有官方对象 footer 的支持。native 写入保留本地块记录字节，并单独编码官方 MDB file/xorb metadata shard；chunk range 使用解压后的字节偏移，CAS Xorb 请求按对象 hash 幂等重试。生成的 shard 由固定版本的官方 Rust 结构解析器验证，并已在 Hugging Face Hub 完成上传与双客户端下载回读。
 
 `remote pull` 由官方 `hf-hub` Rust 客户端读取 Hub revision。已提交文件的 `remote push` 使用 `remote/push_native.rs`：查询 Hub preupload 模式、取得短期 Xet write token、验证并原样上传不可变本地 Xorb，编码 MDB file/xorb sections 与 verification/SHA-256 metadata，注册 shard，再通过 Hub NDJSON commit 写入 LFS pointer。CAS 对象上传最多尝试四次，仅对网络连接/超时与 5xx/408/429 重试；服务端返回的错误体片段和请求 ID 用于定位失败。打开写句柄的文件与大于 inline 上限的非 Xet 文件保留官方 `hf-hub`/`hf-xet` 流式路径。小型 inline 文件通过 Hub 的 base64 commit 操作提交。`remote cat` 的 Xorb 数据面由 `remote_cas.rs` 独立实现：经 Hub metadata 取得 Xet file id，通过 Hub 的 xet-read-token API 获取短期 CAS token，查询 v2 reconstruction（404/501 回退 v1），按照签名 URL 给出的精确 HTTP Range 请求并行读取 Xorb 记录，再通过本地 Xorb 解码器按 term 次序重建。并发数可通过 `--workers` 设为 1–64，默认 1；响应体、重建描述和范围总量均有上限。完整文件读取以本地 Xet file hash 校验，部分范围以 reconstruction 长度、range 边界和解码记录长度校验。短期 token 和签名 URL 仅驻留内存。
+
+Linux `remote mount` 在启动时从 Hub `list_tree` 固定一个文件树视图，只纳入带 Xet file id 的常规文件；目录按需由路径隐式构造。读取按文件偏移切成 4 MiB 对齐窗口，复用同一个 CAS HTTP client 与未过期 token，并通过可配置大小的 LRU 保留最近窗口。挂载提供只读权限；单个部分窗口读取验证相应 Xorb/chunk，但整个文件根哈希只在读全文件时可计算验证。分支后续更新不会改变当前挂载的目录树或已列出的文件 id。
 
 Hub 上传前仍由官方客户端完成分块、shard 注册和 Git LFS 指针提交；本地配方及 Xorb 文件不会直接作为 Hub shard 上传。两套仓库格式保持独立。
 

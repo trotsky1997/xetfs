@@ -15,7 +15,7 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 文件操作 | 顺序与随机读写、追加、截断、零填充空洞、目录、重命名、硬链接、符号链接 |
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
-| Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持远程读取、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
+| Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持按范围读取、Linux 只读按需远程挂载、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
 ## 构建与运行
@@ -27,7 +27,7 @@ cargo build --release --locked
 cargo test --locked --all-targets
 ```
 
-也可直接使用 `bin/xetfs-macos-arm64` 或 `bin/xetfs-linux-arm64`。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，需要 glibc 2.39 及以上和 libgcc；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
+也可直接使用 `bin/xetfs-macos-arm64` 或 `bin/xetfs-linux-arm64`。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
 
 以下示例创建独立仓库，导入本地文件并读取：
 
@@ -75,11 +75,28 @@ $XETFS_BIN --repo ./demo.repo remote push owner/dataset \
   --message "Update training data"
 ```
 
-`--prefix` 是 Hub 仓库内的相对目录，导入后在本地保留同一路径；push 时选择本地同名目录，上传到 Hub 同一路径。pull 遇到已存在且 Xet 文件哈希与长度都相同的文件会跳过；其他同名文件需要 `--force` 才会覆盖。push 只新增或更新文件，不会删除 Hub 上多余的文件；Hub 不存储空目录，符号链接会跳过并计入结果。传输完成后数据保存在本地仓库，因此后续读取不依赖网络；当前 FUSE 挂载本身仍挂载本地仓库。
+`--prefix` 是 Hub 仓库内的相对目录。pull 导入后保留同一路径；push 选择本地同名目录并上传到 Hub 同一路径；mount 则把该目录作为挂载根。pull 遇到已存在且 Xet 文件哈希与长度都相同的文件会跳过；其他同名文件需要 `--force` 才会覆盖。push 只新增或更新文件，不会删除 Hub 上多余的文件；Hub 不存储空目录，符号链接会跳过并计入结果。
+
+远程挂载在 Linux 前台运行。先创建空挂载目录，在第一个终端启动挂载：
+
+```sh
+mkdir ./hub-view
+$XETFS_BIN remote mount owner/dataset ./hub-view \
+  --repo-type dataset --revision main --prefix train --cache-mib 256
+```
+
+在另一个终端按需读取文件，之后卸载：
+
+```sh
+cat ./hub-view/weights.bin
+fusermount3 -u ./hub-view
+```
 
 pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 到 64，默认 8。报告中的 `workers` 记录本次配置。
 
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
+
+Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直接按 4 MiB 对齐窗口读取 Xet CAS；HTTP 连接池与短期 token 在一次挂载生命周期中复用，窗口缓存在有界 LRU 内存中。它是只读挂载，默认缓存 256 MiB（`--cache-mib` 可设为 4–16384），`--workers` 控制每个窗口的 CAS 并发请求数。指定 `--prefix` 时该子目录成为挂载根。仅展示 Hub 标记为 Xet 存储的常规文件；inline/LFS 非 Xet 文件会在启动摘要中计数并略过。文件树是挂载时的 revision 元数据快照，不会跟随分支更新；范围读取验证 reconstruction、Xorb 记录与 chunk 哈希，只有完整文件读取时才能验证整个文件根哈希。卸载方式与本地 FUSE 相同。
 
 上传前，XetFS 通过 Hub preupload 接口选择 Xet/LFS 或 inline 模式；native 路径取得短期 Xet write token，验证本地 Xorb、chunk 范围、文件根哈希和 SHA-256 后上传 Xorb 与 metadata shard，最后通过 Hub commit API 写入文件指针。小型 inline 文件仍以 Hub 支持的 base64 文件操作提交；打开写句柄的文件和超出 inline 内存上限的常规文件由官方客户端流式处理。下载继续使用官方 Hub 客户端；本地 SQLite 格式不会上传到 Hub。
 
@@ -131,7 +148,7 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 ## 当前边界
 
-- Hub 同步目前通过显式 `remote pull` / `remote push` 工作，不提供 Hub 文件的按需远程挂载、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
+- `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
 - 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。

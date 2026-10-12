@@ -170,6 +170,23 @@ enum RemoteCommand {
         #[arg(long, default_value = "Sync from XetFS")]
         message: String,
     },
+    /// Mount a Hub revision as a read-only, on-demand Linux filesystem.
+    Mount {
+        #[command(flatten)]
+        hub: HubArgs,
+        /// Empty directory used as the mountpoint.
+        mountpoint: PathBuf,
+        /// Maximum number of concurrent signed Xorb range requests (1-64).
+        #[arg(
+            long,
+            default_value_t = xetfs::remote_cas::DEFAULT_CAS_WORKERS,
+            value_parser = parse_workers
+        )]
+        workers: usize,
+        /// Memory allowed for fetched 4 MiB windows (4-16384 MiB).
+        #[arg(long, default_value_t = 256, value_parser = parse_cache_mib)]
+        cache_mib: usize,
+    },
 }
 #[derive(Args)]
 struct HubArgs {
@@ -181,7 +198,7 @@ struct HubArgs {
     /// Hub branch, tag, or commit SHA.
     #[arg(long, default_value = "main")]
     revision: String,
-    /// Optional repository-relative directory. Pull preserves this prefix locally.
+    /// Optional repository directory; pull retains it, push selects it, and remote mount uses it as root.
     #[arg(long)]
     prefix: Option<String>,
 }
@@ -213,6 +230,16 @@ fn parse_workers(value: &str) -> std::result::Result<usize, String> {
         Ok(workers)
     } else {
         Err("workers must be between 1 and 64".to_owned())
+    }
+}
+fn parse_cache_mib(value: &str) -> std::result::Result<usize, String> {
+    let cache_mib = value
+        .parse::<usize>()
+        .map_err(|_| "cache-mib must be an integer between 4 and 16384".to_owned())?;
+    if (4..=16384).contains(&cache_mib) {
+        Ok(cache_mib)
+    } else {
+        Err("cache-mib must be between 4 and 16384".to_owned())
     }
 }
 impl HubRepoType {
@@ -336,6 +363,36 @@ fn main() -> Result<()> {
             )?;
             io::stdout().lock().write_all(&bytes)?;
             return Ok(());
+        }
+        Command::Remote {
+            command:
+                RemoteCommand::Mount {
+                    hub,
+                    mountpoint,
+                    workers,
+                    cache_mib,
+                },
+        } => {
+            #[cfg(all(target_os = "linux", feature = "fuse"))]
+            {
+                xetfs::remote_fuse::mount(
+                    &hub.repo_id,
+                    hub.repo_type.as_str(),
+                    &hub.revision,
+                    hub.prefix.as_deref(),
+                    mountpoint,
+                    *workers,
+                    cache_mib.saturating_mul(1024 * 1024),
+                )?;
+                return Ok(());
+            }
+            #[cfg(not(all(target_os = "linux", feature = "fuse")))]
+            {
+                let _ = (hub, mountpoint, workers, cache_mib);
+                anyhow::bail!(
+                    "remote FUSE mounting requires Linux and the fuse Cargo feature; remote cat works on macOS"
+                );
+            }
         }
         _ => (),
     }
@@ -521,6 +578,9 @@ fn main() -> Result<()> {
             )?)?,
             RemoteCommand::Cat { .. } => {
                 unreachable!("remote cat is handled before opening a local repository")
+            }
+            RemoteCommand::Mount { .. } => {
+                unreachable!("remote mount is handled before opening a local repository")
             }
             RemoteCommand::Push { hub, message } => json(&xetfs::remote::push(
                 &fs,

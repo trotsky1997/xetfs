@@ -33,7 +33,7 @@ const MAX_XORB_FETCHES: usize = 4096;
 pub const DEFAULT_CAS_WORKERS: usize = 1;
 const TOKEN_REFRESH_SKEW: u64 = 30;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CasToken {
     access_token: String,
@@ -808,76 +808,140 @@ pub fn read_range_with_workers(
     workers: usize,
 ) -> anyhow::Result<Vec<u8>> {
     repository_path(path)?;
-    anyhow::ensure!(
-        (1..=64).contains(&workers),
-        "CAS worker count must be between 1 and 64"
-    );
-    anyhow::ensure!(
-        length <= MAX_RANGE_BYTES,
-        "remote CAS reads are limited to 64 MiB per request"
-    );
-    if length == 0 {
-        return Ok(Vec::new());
-    }
-    let kind: RepoTypeAny = repo_type
-        .parse()
-        .context("invalid Hugging Face repo type")?;
-    let (owner, name) = split_id(repo_id);
-    if name.is_empty() {
-        bail!("invalid Hugging Face repository id: {repo_id}");
-    }
-    let hub = HFClientSync::new().context("initialize Hugging Face client and token")?;
-    let repo: HFRepositorySync<RepoTypeAny> = hub.repository(kind, owner, name);
-    let entries = repo
-        .get_paths_info()
-        .paths(vec![path.to_owned()])
-        .revision(revision.to_owned())
-        .send()
-        .context("read Hub file metadata")?;
-    let (file_size, xet_hash) = entries
-        .into_iter()
-        .find_map(|entry| match entry {
-            RepoTreeEntry::File {
-                path: listed,
-                size,
-                xet_hash,
-                ..
-            } if listed == path => Some((size, xet_hash)),
-            _ => None,
-        })
-        .context("Hub returned no matching file metadata")?;
-    let Some(file_id) = xet_hash else {
-        bail!("Hub file is not stored in Xet CAS; direct range reads require an Xet file id");
-    };
-    let parsed_id =
-        crate::hash::from_hex(&file_id).context("Hub returned an invalid Xet file id")?;
-    anyhow::ensure!(
-        crate::hash::to_hex(&parsed_id) == file_id,
-        "Hub file id must be lowercase hex"
-    );
-    if offset >= file_size {
-        return Ok(Vec::new());
-    }
-    let actual_end = offset.saturating_add(length).min(file_size);
-    let request_range = ByteRange {
-        start: offset,
-        end: actual_end - 1,
-    };
+    let mut reader = RemoteCasReader::new(repo_id, repo_type, revision)?;
+    reader.read_path_range_with_workers(path, offset, length, workers)
+}
 
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .timeout(Duration::from_secs(300))
-        .build()
-        .context("initialize direct Xet CAS HTTP client")?;
-    let token = resolve_cas_token(&client, repo_id, repo_type, revision)?;
-    let reconstruction = get_reconstruction(&client, &token, &file_id, request_range)?;
-    let chunks = fetch_chunks(
-        &client,
-        &reconstruction,
-        workers,
-        request_range.end - request_range.start + 1,
-    )?;
-    decode_range(&file_id, file_size, request_range, reconstruction, chunks)
+/// A reusable direct Xet CAS reader for one Hub repository revision.
+///
+/// The HTTP connection pool and short-lived CAS token are retained across reads.
+pub struct RemoteCasReader {
+    repo_id: String,
+    repo_type: String,
+    revision: String,
+    client: Client,
+    token: Option<CasToken>,
+}
+
+impl RemoteCasReader {
+    pub fn new(repo_id: &str, repo_type: &str, revision: &str) -> anyhow::Result<Self> {
+        let _: RepoTypeAny = repo_type
+            .parse()
+            .context("invalid Hugging Face repo type")?;
+        let (_, name) = split_id(repo_id);
+        if name.is_empty() {
+            bail!("invalid Hugging Face repository id: {repo_id}");
+        }
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("initialize direct Xet CAS HTTP client")?;
+        Ok(Self {
+            repo_id: repo_id.to_owned(),
+            repo_type: repo_type.to_ascii_lowercase(),
+            revision: revision.to_owned(),
+            client,
+            token: None,
+        })
+    }
+
+    fn token(&mut self) -> anyhow::Result<CasToken> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Some(token) = self.token.as_ref()
+            && token.exp > now.saturating_add(TOKEN_REFRESH_SKEW)
+        {
+            return Ok(token.clone());
+        }
+        let token =
+            resolve_cas_token(&self.client, &self.repo_id, &self.repo_type, &self.revision)?;
+        self.token = Some(token.clone());
+        Ok(token)
+    }
+
+    /// Read by Xet file id and size already obtained from Hub revision metadata.
+    pub fn read_file_range_with_workers(
+        &mut self,
+        file_id: &str,
+        file_size: u64,
+        offset: u64,
+        length: u64,
+        workers: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::ensure!(
+            (1..=64).contains(&workers),
+            "CAS worker count must be between 1 and 64"
+        );
+        anyhow::ensure!(
+            length <= MAX_RANGE_BYTES,
+            "remote CAS reads are limited to 64 MiB per request"
+        );
+        if length == 0 || offset >= file_size {
+            return Ok(Vec::new());
+        }
+        let parsed_id = crate::hash::from_hex(file_id).context("invalid Xet file id")?;
+        anyhow::ensure!(
+            crate::hash::to_hex(&parsed_id) == file_id,
+            "Xet file id must be lowercase hex"
+        );
+        let actual_end = offset.saturating_add(length).min(file_size);
+        let request_range = ByteRange {
+            start: offset,
+            end: actual_end - 1,
+        };
+
+        let token = self.token()?;
+        let reconstruction = get_reconstruction(&self.client, &token, file_id, request_range)?;
+        let chunks = fetch_chunks(
+            &self.client,
+            &reconstruction,
+            workers,
+            request_range.end - request_range.start + 1,
+        )?;
+        decode_range(file_id, file_size, request_range, reconstruction, chunks)
+    }
+
+    pub fn read_path_range_with_workers(
+        &mut self,
+        path: &str,
+        offset: u64,
+        length: u64,
+        workers: usize,
+    ) -> anyhow::Result<Vec<u8>> {
+        repository_path(path)?;
+        let kind: RepoTypeAny = self
+            .repo_type
+            .parse()
+            .context("invalid Hugging Face repo type")?;
+        let (owner, name) = split_id(&self.repo_id);
+        let hub = HFClientSync::new().context("initialize Hugging Face client and token")?;
+        let repo: HFRepositorySync<RepoTypeAny> = hub.repository(kind, owner, name);
+        let entries = repo
+            .get_paths_info()
+            .paths(vec![path.to_owned()])
+            .revision(self.revision.clone())
+            .send()
+            .context("read Hub file metadata")?;
+        let (file_size, xet_hash) = entries
+            .into_iter()
+            .find_map(|entry| match entry {
+                RepoTreeEntry::File {
+                    path: listed,
+                    size,
+                    xet_hash,
+                    ..
+                } if listed == path => Some((size, xet_hash)),
+                _ => None,
+            })
+            .context("Hub returned no matching file metadata")?;
+        let Some(file_id) = xet_hash else {
+            bail!("Hub file is not stored in Xet CAS; direct range reads require an Xet file id");
+        };
+        self.read_file_range_with_workers(&file_id, file_size, offset, length, workers)
+    }
 }
 
 #[cfg(test)]
