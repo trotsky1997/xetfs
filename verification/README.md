@@ -4,8 +4,9 @@
 
 | 验证 | 环境 | 结果与证据 |
 | --- | --- | --- |
-| 格式、Clippy、Rust 测试、release 构建 | macOS 26 / Darwin 25.5，ARM64，Rust 1.98 | 完整测试 31 项通过；native Hub Xet CAS 上传与 MDB shard 偏移回归测试覆盖；[基线提交 GitHub CI](https://github.com/trotsky1997/xetfs/actions/runs/38210485668) |
+| 格式、Clippy、Rust 测试、release 构建 | macOS 26 / Darwin 25.5，ARM64，Rust 1.98 | 完整测试 31 项通过；native Hub Xet CAS 上传与 MDB shard 偏移回归测试覆盖；[最新实现 GitHub CI](https://github.com/trotsky1997/xetfs/actions/runs/38214453272) |
 | Clippy、Rust 测试、release 构建 | Ubuntu 26.04.1，ARM64，Rust 1.98 | 25 项测试通过；[日志](linux-checks.log) |
+| ARM64 随仓库二进制刷新 | macOS ARM64 / Ubuntu 24.04.5 ARM64，Rust 1.98 | 两个 release 二进制均从当前源码重建；各自执行 init/put/cat/fsck 冒烟验证；Linux 动态符号最高为 `GLIBC_2.39`，依赖 `libgcc_s.so.1`；校验文件：[SHA256SUMS](../bin/SHA256SUMS)，构建元数据：[build.json](build.json) |
 | 官方样本 | 63,527,244 字节 CSV、官方 Xorb、固定 dataset revision | 796 个分块边界和块哈希全部一致；文件/Xorb 哈希一致；重建字节一致；[JSON](official-reference.json) |
 | Hub 真实读取 | `xet-team/xet-spec-reference-files` 固定 revision；公开只读；macOS ARM64 | 经 Hugging Face Xet 客户端拉取 16 个文件、78,840,265 字节；导出的 CSV SHA-256 一致；fsck 验证 14 个 Xorb、1,041 个块、15 个配方；[JSON](remote-pull.json) |
 | 独立 CAS 远程读取 | 同一公开 revision；直接 Hub metadata + Xet read token + CAS reconstruction + 签名 Xorb Range；macOS ARM64 | 全文件 63,527,244 字节，客户端验证 Xet 文件哈希和 SHA-256；偏移 1 MiB 的 64 KiB 范围与全文件切片一致；[JSON](direct-cas-read.json)；复现脚本：[verify_direct_cas.py](../scripts/verify_direct_cas.py) |

@@ -15,12 +15,12 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 文件操作 | 顺序与随机读写、追加、截断、零填充空洞、目录、重命名、硬链接、符号链接 |
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
-| Hub 远程传输 | 通过 Hugging Face 官方 Rust Xet 客户端拉取文件、上传文件并创建 Hub commit |
+| Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持远程读取、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
 ## 构建与运行
 
-需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。仓库中的 ARM64 预编译二进制来自上一版，不含下文的 Hub 远程命令；远程同步请使用本源码构建的程序。
+需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。仓库中的 ARM64 预编译二进制已从当前源码重建，包含下文的 Hub 远程命令。
 
 ```sh
 cargo build --release --locked

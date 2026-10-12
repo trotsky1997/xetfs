@@ -2,30 +2,42 @@
   "version": "0.1.0",
   "date": "2026-10-12",
   "timezone": "Asia/Shanghai",
-  "source_manifest_sha256": "003c8a13a35c2d4c676db6b4185d3a8b7d9846694762c9210fcf7c2fb1708913",
-  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)",
+  "source_manifest_sha256": "7e5f103c5754ebbf3a8522ac9ecd5005ab9e2aa370d7ccc782b111f49b1d3496",
+  "rustc": {
+    "macos_arm64": "rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew)",
+    "linux_arm64": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+  },
   "native": {
     "system": "macOS-26.5-arm64-arm-64bit",
     "macos": "26.5",
-    "tests_passed": 25,
+    "tests_passed": 31,
     "fmt": "passed",
     "clippy": "passed",
-    "release_build": "passed"
+    "release_build": "passed",
+    "artifact_smoke": "init, put, cat, fsck passed",
+    "binary_minimum_macos": "11.0"
   },
   "linux": {
-    "system": "Linux-7.0.12-linuxkit-aarch64",
-    "distribution": "Ubuntu 26.04.1 LTS",
-    "tests_passed": 25,
-    "clippy": "passed",
-    "release_build": "passed",
-    "fuse_root": "passed",
-    "fuse_user_65534": "passed",
+    "build_system": "Ubuntu 24.04.5 LTS ARM64",
+    "target": "aarch64-unknown-linux-gnu",
+    "glibc_build_version": "2.39",
     "glibc_required": "2.39 or newer",
-    "additional_runtime": "libgcc_s.so.1"
+    "additional_runtime": "libgcc_s.so.1",
+    "release_build": "passed",
+    "artifact_smoke": "init, put, cat, fsck passed",
+    "ci_tests_passed": 31,
+    "ci_test_environment": "GitHub Actions ubuntu-latest",
+    "fuse_root": "passed",
+    "fuse_user_65534": "passed"
   },
   "binary_sha256": {
-    "xetfs-linux-arm64": "c348a321f05e87d424b08c450c28ba0c3020aee2d57e4e1fc0a0a5940c35d591",
-    "xetfs-macos-arm64": "d8e389ba1a38bada29c4e32a4e22cd501298a60117208d7ecde80cc98a136122"
+    "xetfs-linux-arm64": "23b231b2a89803426e790a23dde52158a59e941e61d0a9b60258403ed02ceac1",
+    "xetfs-macos-arm64": "f4d105c5dc240e493d4b66b828ce5593b2bd3df60c7e173d0dea517c6f106615"
   },
-  "remote_ci": "not run"
+  "remote_ci": {
+    "url": "https://github.com/trotsky1997/xetfs/actions/runs/38214453272",
+    "conclusion": "success",
+    "macos_tests_passed": 31,
+    "ubuntu_tests_passed": 31
+  }
 }
