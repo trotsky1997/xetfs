@@ -1,0 +1,83 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "os": "macOS 26.5",
+    "kernel": "Darwin 25.5.0",
+    "architecture": "aarch64",
+    "model": "Mac17,8",
+    "cpu": "Apple M5 Pro",
+    "logical_cpus": 18,
+    "rustc": "1.98.1"
+  },
+  "profile": "release with thin LTO",
+  "dataset": {
+    "kind": "seeded pseudorandom bytes",
+    "seed": 20261012,
+    "size_bytes": 134217728,
+    "inserted_bytes": 279,
+    "insertion_offset": 123456
+  },
+  "method": "scripts/dedup_demo.py; five paired trials with baseline and optimized binaries alternated in execution order, five fresh temporary repositories per binary; source generation excluded from each import timer; each put includes CLI startup, chunking, hashing, compression, object persistence, and metadata commit.",
+  "baseline": {
+    "commit": "6019b8b58c6dea2f746b273cf778857cbfc192fd",
+    "binary_sha256": "44a86b884de2b2dd468a68fba6745024974ec4ef0a39926c8f0aea16ba7da915",
+    "import_seconds": [
+      0.3569777919999999,
+      0.344952292,
+      0.366860917,
+      0.378091291,
+      0.35741720800000004
+    ],
+    "edited_import_seconds": [
+      0.177499584,
+      0.176238,
+      0.18484145900000004,
+      0.17247470899999995,
+      0.22793658300000008
+    ]
+  },
+  "optimized": {
+    "source_sha256": "4cb9a19a8c1169c2eca81a55710e6d86b7d30f96f294c90ac5d3724edd7c3635",
+    "binary_sha256": "1fafc4db70aa18ff7a14b2e3d11eedd38c4ca07376c7c781dc5aa707d652444e",
+    "import_seconds": [
+      0.340658875,
+      0.311981375,
+      0.307577417,
+      0.30623445800000004,
+      0.328171875
+    ],
+    "edited_import_seconds": [
+      0.12446783299999997,
+      0.12048150000000002,
+      0.13095041600000001,
+      0.117824292,
+      0.12082870899999998
+    ]
+  },
+  "median_comparison": {
+    "full_import": {
+      "baseline_seconds": 0.35741720800000004,
+      "optimized_seconds": 0.311981375,
+      "throughput_baseline_mib_s": 358.12489475884433,
+      "throughput_optimized_mib_s": 410.28090218526665,
+      "throughput_gain_percent": 14.563636370921195
+    },
+    "edited_import": {
+      "baseline_seconds": 0.177499584,
+      "optimized_seconds": 0.12082870899999998,
+      "throughput_baseline_mib_s": 721.128450644707,
+      "throughput_optimized_mib_s": 1059.3508865513081,
+      "throughput_gain_percent": 46.90182943194403
+    }
+  },
+  "correctness": {
+    "identical_copy_added_xorb_bytes": 0,
+    "edited_version_added_unique_raw_bytes": 64664,
+    "edited_version_reused_fraction": 0.9995182166577693,
+    "snapshot_readback": true,
+    "range_readback": true,
+    "fsck": true
+  },
+  "scope_note": "This is an alternating before/after local XetFS benchmark on one host. It does not measure or establish throughput superiority over Hugging Face server-side CAS."
+}

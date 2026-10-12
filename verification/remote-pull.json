@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "repository": "xet-team/xet-spec-reference-files",
+  "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "method": "xetfs remote pull using the pinned upstream Rust hf-hub/hf-xet client; public, read-only repository; temporary local repository; exact CSV SHA-256 checked after export.",
+  "pull_seconds": 29.242955000000002,
+  "files_downloaded": 16,
+  "bytes_downloaded": 78840265,
+  "exported_csv": {
+    "path": "Electric_Vehicle_Population_Data_20250917.csv",
+    "bytes": 63527244,
+    "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+  },
+  "fsck": {
+    "xorbs_verified": 14,
+    "chunks_verified": 1041,
+    "recipes_verified": 15
+  },
+  "scope_note": "Validates a real remote Xet download and local import. No Hugging Face remote write was performed."
+}

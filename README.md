@@ -8,7 +8,7 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 
 | 能力 | 行为 |
 | --- | --- |
-| 内容定义分块 | Gearhash；8 KiB 最小、64 KiB 目标、128 KiB 最大；流式输入 |
+| 内容定义分块 | Gearhash；8 KiB 最小、64 KiB 目标、128 KiB 最大；流式输入；SIMD 加速且保持官方边界 |
 | 内容寻址 | Xet keyed BLAKE3 块哈希、文件 Merkle 哈希、Xorb 哈希、term verification hash |
 | 去重与压缩 | 仓库范围的跨文件、跨版本去重；raw、LZ4 frame、BG4 + LZ4 自动择优 |
 | 数据组织 | 不超过 64 MiB 的不可变 Xorb；文件保存块配方；`manifest` 展示合并后的 Xorb 范围 |
@@ -121,7 +121,7 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 官方样本验证下载约 78 MB 数据；普通 Rust 测试不需要联网。官方向量固定在 dataset revision `c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8`。`verification/` 保存此次实测报告。
 
-实测包含：官方 CSV 的 796 个分块边界及块哈希、文件/Xorb/verification 哈希、官方 Xorb 解码后的完整字节比对、跨 Xorb 大文件读取、导入中断回滚、快照与 GC、真实内核挂载及 SIGKILL 后 fsync 数据恢复。具体环境和指标见 [验证记录](verification/README.md)。
+实测包含：官方 CSV 的 796 个分块边界及块哈希、文件/Xorb/verification 哈希、官方 Xorb 解码后的完整字节比对、跨 Xorb 大文件读取、导入中断回滚、快照与 GC、真实内核挂载及 SIGKILL 后 fsync 数据恢复。性能基准对同一 128 MiB 数据集运行三次，记录优化前后的中位数；Hub 只读拉取也在固定公开 revision 上完成并核对 SHA-256。具体环境和指标见 [验证记录](verification/README.md)。
 
 ## 当前边界
 
