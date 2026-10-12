@@ -1,0 +1,10 @@
+{
+  "status": "passed",
+  "reference_revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "bytes": 63527244,
+  "chunks_matched": 796,
+  "file_hash": "118a53328412787fee04011dcf82fdc4acf3a4a1eddec341c910d30a306aaf97",
+  "xorb_hash": "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632",
+  "official_xorb_decoded": true,
+  "reconstructed_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+}

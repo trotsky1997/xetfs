@@ -1,0 +1,58 @@
+$ cargo clippy --locked --all-targets -- -D warnings
+    Checking xetfs v0.1.0 (/src)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.07s
+$ cargo test --locked --all-targets
+   Compiling xetfs v0.1.0 (/src)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.02s
+     Running unittests src/lib.rs (/build/target/debug/deps/xetfs-a769dd354cd44369)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/build/target/debug/deps/xetfs-ccaeeda326f29cb3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/algorithms.rs (/build/target/debug/deps/algorithms-ce4937a882718257)
+
+running 8 tests
+test xet_hash_hex_endianness_and_validation ... ok
+test official_sample_terminator_is_only_accepted_at_eof ... ok
+test malformed_and_truncated_records_fail_without_unbounded_allocation ... ok
+test empty_tiny_and_forced_boundaries ... ok
+test official_796_chunk_merkle_and_file_hash_vectors ... ok
+test xorb_codecs_roundtrip_odd_lengths_and_choose_compression ... ok
+test streaming_boundaries_are_independent_of_read_fragmentation ... ok
+test insertion_preserves_most_chunk_identities ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/filesystem.rs (/build/target/debug/deps/filesystem-d973ada6de1230ed)
+
+running 17 tests
+test kernel_lookup_pins_keep_unlinked_inode_until_forget ... ok
+test repository_lock_rejects_second_owner ... ok
+test handle_access_modes_and_gc_exclusion ... ok
+test missing_and_corrupt_objects_are_detected ... ok
+test hard_links_share_mutations_but_recipe_copies_do_not ... ok
+test directory_rename_cycles_type_checks_and_link_counts ... ok
+test open_unlink_and_rename_replacement_preserve_old_handles ... ok
+test shared_handles_random_writes_holes_append_and_truncate ... ok
+test ownership_modes_and_explicit_timestamps_survive_restore ... ok
+test symlink_resolution_and_non_utf8_names ... ok
+test snapshots_preserve_namespace_links_and_content_across_gc ... ok
+test seeded_random_writes_and_truncation_match_a_byte_vector_after_reopens ... ok
+test gc_compacts_partially_live_xorbs_without_changing_recipes ... ok
+test reconstruction_terms_cover_the_file_and_remain_valid_after_compaction ... ok
+test persisted_import_range_reads_and_duplicate_files ... ok
+test failed_multi_pack_import_keeps_old_file_and_gc_removes_orphans ... ok
+test successful_large_import_splits_xorbs_and_reads_across_the_pack_boundary ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.89s
+
+$ cargo build --release --locked
+   Compiling xetfs v0.1.0 (/src)
+    Finished `release` profile [optimized] target(s) in 3.55s

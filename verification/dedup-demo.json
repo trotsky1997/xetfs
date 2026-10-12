@@ -1,0 +1,16 @@
+{
+  "status": "passed",
+  "dataset": "seeded pseudorandom bytes",
+  "seed": 20261012,
+  "original_bytes": 16777216,
+  "insertion_bytes": 279,
+  "identical_copy_added_xorb_bytes": 0,
+  "edited_version_added_unique_raw_bytes": 64664,
+  "edited_version_added_xorb_bytes": 64672,
+  "edited_version_reused_fraction": 0.9961457893445953,
+  "import_seconds": 0.06651575,
+  "edited_import_seconds": 0.041739583,
+  "snapshot_readback": true,
+  "range_readback": true,
+  "fsck": true
+}

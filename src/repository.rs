@@ -1,0 +1,721 @@
+use crate::{
+    Error, Result,
+    chunker::Chunker,
+    hash::{self, Hash},
+    xorb,
+};
+use fs2::FileExt;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
+use std::{
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[repr(i64)]
+pub enum Kind {
+    File = 1,
+    Directory = 2,
+    Symlink = 3,
+}
+impl Kind {
+    pub(crate) fn from_i64(n: i64) -> rusqlite::Result<Self> {
+        match n {
+            1 => Ok(Self::File),
+            2 => Ok(Self::Directory),
+            3 => Ok(Self::Symlink),
+            _ => Err(rusqlite::Error::InvalidQuery),
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct Node {
+    pub ino: u64,
+    pub kind: Kind,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub atime_ns: i64,
+    pub mtime_ns: i64,
+    pub ctime_ns: i64,
+    pub content: Option<String>,
+    pub target: Option<Vec<u8>>,
+    pub nlink: u32,
+}
+impl Node {
+    pub(crate) fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            ino: r.get(0)?,
+            kind: Kind::from_i64(r.get(1)?)?,
+            mode: r.get(2)?,
+            uid: r.get(3)?,
+            gid: r.get(4)?,
+            size: r.get(5)?,
+            atime_ns: r.get(6)?,
+            mtime_ns: r.get(7)?,
+            ctime_ns: r.get(8)?,
+            content: r.get(9)?,
+            target: r.get(10)?,
+            nlink: r.get(11)?,
+        })
+    }
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct DirEntry {
+    pub name: Vec<u8>,
+    pub node: Node,
+}
+#[derive(Debug, Serialize)]
+pub struct Stats {
+    pub files: u64,
+    pub directories: u64,
+    pub logical_bytes: u64,
+    pub recipes: u64,
+    pub recipe_bytes: u64,
+    pub unique_chunks: u64,
+    pub unique_chunk_bytes: u64,
+    pub xorbs: u64,
+    pub xorb_bytes: u64,
+    pub database_bytes: u64,
+    pub snapshots: u64,
+}
+#[derive(Debug, Serialize)]
+pub struct Snapshot {
+    pub name: String,
+    pub created_ns: i64,
+}
+#[derive(Debug, Serialize)]
+pub struct GcReport {
+    pub removed_objects: u64,
+    pub reclaimed_bytes: u64,
+    pub before_object_bytes: u64,
+    pub after_object_bytes: u64,
+    pub chunks_remaining: u64,
+}
+#[derive(Debug, Serialize)]
+pub struct Reconstruction {
+    pub file_hash: String,
+    pub size: u64,
+    pub terms: Vec<Term>,
+}
+#[derive(Debug, Serialize)]
+pub struct Term {
+    pub xorb: String,
+    pub chunk_start: u64,
+    pub chunk_end: u64,
+    pub offset: u64,
+    pub size: u64,
+    pub verification_hash: String,
+}
+#[derive(Debug, Serialize)]
+pub struct FsckReport {
+    pub xorbs_verified: u64,
+    pub chunks_verified: u64,
+    pub recipes_verified: u64,
+}
+
+pub(crate) fn now_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
+}
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+/// A repository has one process owner. The lock covers metadata, staging and GC.
+pub struct Repository {
+    pub(crate) conn: Connection,
+    pub(crate) root: PathBuf,
+    _lock: File,
+}
+#[derive(Default)]
+struct Pack {
+    bytes: Vec<u8>,
+    chunks: Vec<(Hash, u64, u64, u64)>,
+}
+impl Pack {
+    fn add(&mut self, h: Hash, len: u64, record: Vec<u8>) {
+        self.chunks
+            .push((h, len, self.bytes.len() as u64, record.len() as u64));
+        self.bytes.extend(record);
+    }
+}
+fn save_pack(tx: &Transaction<'_>, root: &Path, pack: &mut Pack) -> Result<()> {
+    if pack.chunks.is_empty() {
+        return Ok(());
+    }
+    let id = hash::to_hex(&hash::xorb_hash(
+        &pack
+            .chunks
+            .iter()
+            .map(|&(h, n, _, _)| (h, n))
+            .collect::<Vec<_>>(),
+    ));
+    let path = root.join("objects").join(format!("{id}.xorb"));
+    let mut temp = tempfile::NamedTempFile::new_in(root.join("tmp"))?;
+    temp.write_all(&pack.bytes)?;
+    temp.as_file().sync_all()?;
+    match temp.persist_noclobber(&path) {
+        Ok(_) => (),
+        Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::read(&path)? != pack.bytes {
+                return Err(Error::Corrupt(format!("existing object differs: {id}")));
+            }
+        }
+        Err(e) => return Err(e.error.into()),
+    }
+    sync_dir(&root.join("objects"))?;
+    tx.execute(
+        "INSERT OR IGNORE INTO xorbs VALUES (?1,?2)",
+        params![id, pack.bytes.len() as u64],
+    )?;
+    for (i, &(h, len, offset, stored)) in pack.chunks.iter().enumerate() {
+        let hex = hash::to_hex(&h);
+        tx.execute(
+            "INSERT OR IGNORE INTO xorb_chunks VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, i as u64, hex, len, offset, stored],
+        )?;
+        tx.execute("INSERT INTO chunks VALUES (?1,?2,?3) ON CONFLICT(hash) DO UPDATE SET xorb=excluded.xorb,idx=excluded.idx", params![hex,id,i as u64])?;
+    }
+    *pack = Pack::default();
+    Ok(())
+}
+fn read_chunk(conn: &Connection, root: &Path, hex: &str) -> Result<Vec<u8>> {
+    let (object,offset,len,stored): (String,u64,u64,u64) = conn.query_row(
+        "SELECT p.xorb,p.offset,p.len,p.stored FROM chunks c JOIN xorb_chunks p ON p.xorb=c.xorb AND p.idx=c.idx WHERE c.hash=?1",
+        [hex], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+    hash::from_hex(&object)?;
+    let mut file = File::open(root.join("objects").join(format!("{object}.xorb")))?;
+    file.seek(SeekFrom::Start(offset))?;
+    let (data, consumed) =
+        xorb::decode(&mut file)?.ok_or_else(|| Error::Corrupt("missing chunk".into()))?;
+    if data.len() as u64 != len
+        || consumed != stored
+        || hash::to_hex(&hash::chunk_hash(&data)) != hex
+    {
+        return Err(Error::Corrupt(format!("chunk integrity failed: {hex}")));
+    }
+    Ok(data)
+}
+impl Repository {
+    pub fn init(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.exists() && fs::read_dir(path)?.next().is_some() {
+            return Err(Error::Invalid("repository directory must be empty".into()));
+        }
+        fs::create_dir_all(path)?;
+        let root = fs::canonicalize(path)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("LOCK"))?;
+        lock.try_lock_exclusive().map_err(|_| Error::Busy)?;
+        fs::create_dir(root.join("objects"))?;
+        fs::create_dir(root.join("tmp"))?;
+        let mut conn = Connection::open(root.join("metadata.sqlite"))?;
+        Self::configure(&conn)?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(include_str!("schema.sql"))?;
+        let now = now_ns();
+        tx.execute("INSERT INTO inodes(ino,kind,mode,uid,gid,size,atime,mtime,ctime) VALUES(1,2,?1,?2,?3,0,?4,?4,?4)", params![0o755,unsafe {libc::getuid()},unsafe {libc::getgid()},now])?;
+        tx.commit()?;
+        sync_dir(&root)?;
+        Ok(Self {
+            conn,
+            root,
+            _lock: lock,
+        })
+    }
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let root = fs::canonicalize(path)?;
+        if !root.join("metadata.sqlite").is_file() {
+            return Err(Error::Invalid("not a XetFS repository".into()));
+        }
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("LOCK"))?;
+        lock.try_lock_exclusive().map_err(|_| Error::Busy)?;
+        let conn = Connection::open(root.join("metadata.sqlite"))?;
+        Self::configure(&conn)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != 1 {
+            return Err(Error::Invalid(format!(
+                "unsupported repository version: {version}"
+            )));
+        }
+        conn.execute("DELETE FROM inodes WHERE ino<>1 AND NOT EXISTS(SELECT 1 FROM entries WHERE entries.ino=inodes.ino)",[])?;
+        for entry in fs::read_dir(root.join("tmp"))? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(Self {
+            conn,
+            root,
+            _lock: lock,
+        })
+    }
+    fn configure(conn: &Connection) -> Result<()> {
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+        )?;
+        Ok(())
+    }
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+    /// Objects become durable before the transaction publishes their index.
+    pub fn ingest(&mut self, input: impl Read) -> Result<(String, u64)> {
+        let tx = self.conn.transaction()?;
+        let mut pack = Pack::default();
+        let mut seen = HashSet::new();
+        let mut recipe = Vec::new();
+        let mut size = 0u64;
+        for data in Chunker::new(input) {
+            let data = data?;
+            let h = hash::chunk_hash(&data);
+            let hex = hash::to_hex(&h);
+            let len = data.len() as u64;
+            size = size
+                .checked_add(len)
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or_else(|| Error::Invalid("file exceeds maximum size".into()))?;
+            recipe.push((h, len));
+            if !seen.insert(hex.clone()) {
+                continue;
+            }
+            if tx
+                .query_row("SELECT 1 FROM chunks WHERE hash=?1", [&hex], |_| Ok(()))
+                .optional()?
+                .is_some()
+            {
+                continue;
+            }
+            let record = xorb::encode(&data)?;
+            if pack.bytes.len() + record.len() > xorb::MAX_XORB {
+                save_pack(&tx, &self.root, &mut pack)?;
+            }
+            pack.add(h, len, record);
+        }
+        save_pack(&tx, &self.root, &mut pack)?;
+        let id = hash::to_hex(&hash::file_hash(&recipe));
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO contents VALUES (?1,?2)",
+            params![id, size],
+        )?;
+        if inserted != 0 {
+            let mut offset = 0u64;
+            let mut stmt = tx.prepare_cached("INSERT INTO file_chunks VALUES (?1,?2,?3,?4,?5)")?;
+            for (idx, (h, len)) in recipe.iter().enumerate() {
+                stmt.execute(params![id, idx as u64, offset, len, hash::to_hex(h)])?;
+                offset += len;
+            }
+        }
+        tx.commit()?;
+        Ok((id, size))
+    }
+    pub fn read_content(&self, id: &str, offset: u64, size: usize) -> Result<Vec<u8>> {
+        let len: u64 = self
+            .conn
+            .query_row("SELECT size FROM contents WHERE id=?1", [id], |r| r.get(0))?;
+        let end = offset.saturating_add(size as u64).min(len);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::with_capacity((end - offset) as usize);
+        let mut stmt = self.conn.prepare("SELECT hash,offset,len FROM file_chunks WHERE content=?1 AND offset>=COALESCE((SELECT offset FROM file_chunks WHERE content=?1 AND offset<=?2 ORDER BY offset DESC LIMIT 1),0) AND offset<?3 ORDER BY offset")?;
+        let rows = stmt.query_map(params![id, offset, end], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (hex, start, len) = row?;
+            let data = read_chunk(&self.conn, &self.root, &hex)?;
+            let from = offset.saturating_sub(start) as usize;
+            let to = (end - start).min(len) as usize;
+            out.extend_from_slice(&data[from..to]);
+        }
+        if out.len() as u64 != end - offset {
+            return Err(Error::Corrupt("incomplete file reconstruction".into()));
+        }
+        Ok(out)
+    }
+    pub fn export_content(&self, id: &str, mut output: impl Write) -> Result<()> {
+        self.conn
+            .query_row("SELECT 1 FROM contents WHERE id=?1", [id], |_| Ok(()))
+            .optional()?
+            .ok_or(Error::Errno(libc::ENOENT))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash FROM file_chunks WHERE content=?1 ORDER BY idx")?;
+        let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+        for row in rows {
+            output.write_all(&read_chunk(&self.conn, &self.root, &row?)?)?;
+        }
+        Ok(())
+    }
+    /// Adjacent chunks in the same Xorb coalesce into end-exclusive range terms.
+    pub fn reconstruction(&self, id: &str) -> Result<Reconstruction> {
+        let size = self
+            .conn
+            .query_row("SELECT size FROM contents WHERE id=?1", [id], |r| r.get(0))
+            .optional()?
+            .ok_or(Error::Errno(libc::ENOENT))?;
+        let mut stmt=self.conn.prepare("SELECT c.xorb,c.idx,f.offset,f.len,f.hash FROM file_chunks f JOIN chunks c ON c.hash=f.hash WHERE f.content=?1 ORDER BY f.idx")?;
+        let rows = stmt.query_map([id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, u64>(1)?,
+                r.get::<_, u64>(2)?,
+                r.get::<_, u64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        let mut terms: Vec<Term> = Vec::new();
+        let mut term_chunks: Vec<Vec<Hash>> = Vec::new();
+        for row in rows {
+            let (xorb, idx, offset, len, hex) = row?;
+            let h = hash::from_hex(&hex)?;
+            if let Some(last) = terms
+                .last_mut()
+                .filter(|last| last.xorb == xorb && last.chunk_end == idx)
+            {
+                last.chunk_end += 1;
+                last.size += len;
+                term_chunks.last_mut().unwrap().push(h);
+            } else {
+                terms.push(Term {
+                    xorb,
+                    chunk_start: idx,
+                    chunk_end: idx + 1,
+                    offset,
+                    size: len,
+                    verification_hash: String::new(),
+                });
+                term_chunks.push(vec![h]);
+            }
+        }
+        for (term, chunks) in terms.iter_mut().zip(term_chunks) {
+            term.verification_hash = hash::to_hex(&hash::verification_hash(&chunks));
+        }
+        Ok(Reconstruction {
+            file_hash: id.into(),
+            size,
+            terms,
+        })
+    }
+    pub fn stats(&self) -> Result<Stats> {
+        let scalar = |sql: &str| -> Result<u64> { Ok(self.conn.query_row(sql, [], |r| r.get(0))?) };
+        let database_bytes = [
+            "metadata.sqlite",
+            "metadata.sqlite-wal",
+            "metadata.sqlite-shm",
+        ]
+        .iter()
+        .filter_map(|p| fs::metadata(self.root.join(p)).ok())
+        .map(|m| m.len())
+        .sum();
+        Ok(Stats {
+            files: scalar(
+                "SELECT COUNT(*) FROM inodes WHERE kind=1 AND EXISTS(SELECT 1 FROM entries WHERE entries.ino=inodes.ino)",
+            )?,
+            directories: scalar("SELECT COUNT(*) FROM inodes WHERE kind=2")?,
+            logical_bytes: scalar(
+                "SELECT COALESCE(SUM(size),0) FROM inodes WHERE kind=1 AND EXISTS(SELECT 1 FROM entries WHERE entries.ino=inodes.ino)",
+            )?,
+            recipes: scalar("SELECT COUNT(*) FROM contents")?,
+            recipe_bytes: scalar("SELECT COALESCE(SUM(size),0) FROM contents")?,
+            unique_chunks: scalar("SELECT COUNT(*) FROM chunks")?,
+            unique_chunk_bytes: scalar(
+                "SELECT COALESCE(SUM(p.len),0) FROM chunks c JOIN xorb_chunks p ON c.xorb=p.xorb AND c.idx=p.idx",
+            )?,
+            xorbs: scalar("SELECT COUNT(*) FROM xorbs")?,
+            xorb_bytes: scalar("SELECT COALESCE(SUM(size),0) FROM xorbs")?,
+            database_bytes,
+            snapshots: scalar("SELECT COUNT(*) FROM snapshots")?,
+        })
+    }
+    pub fn snapshots(&self) -> Result<Vec<Snapshot>> {
+        Ok(self
+            .conn
+            .prepare("SELECT name,created FROM snapshots ORDER BY name")?
+            .query_map([], |r| {
+                Ok(Snapshot {
+                    name: r.get(0)?,
+                    created_ns: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub(crate) fn snapshot(&mut self, name: &str) -> Result<()> {
+        if name.is_empty() || name.len() > 255 || name.contains('\0') {
+            return Err(Error::Invalid("invalid snapshot name".into()));
+        }
+        if self
+            .conn
+            .query_row("SELECT 1 FROM snapshots WHERE name=?1", [name], |_| Ok(()))
+            .optional()?
+            .is_some()
+        {
+            return Err(Error::Errno(libc::EEXIST));
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO snapshots VALUES (?1,?2)",
+            params![name, now_ns()],
+        )?;
+        tx.execute("INSERT INTO snapshot_nodes SELECT ?1,* FROM inodes WHERE ino=1 OR EXISTS(SELECT 1 FROM entries WHERE entries.ino=inodes.ino)",[name])?;
+        tx.execute(
+            "INSERT INTO snapshot_entries SELECT ?1,* FROM entries",
+            [name],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn drop_snapshot(&mut self, name: &str) -> Result<()> {
+        if self
+            .conn
+            .execute("DELETE FROM snapshots WHERE name=?1", [name])?
+            == 0
+        {
+            return Err(Error::Errno(libc::ENOENT));
+        }
+        Ok(())
+    }
+    pub(crate) fn restore(&mut self, name: &str) -> Result<()> {
+        if self
+            .conn
+            .query_row("SELECT 1 FROM snapshots WHERE name=?1", [name], |_| Ok(()))
+            .optional()?
+            .is_none()
+        {
+            return Err(Error::Errno(libc::ENOENT));
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM entries", [])?;
+        tx.execute("DELETE FROM inodes", [])?;
+        tx.execute("INSERT INTO inodes SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,content,target FROM snapshot_nodes WHERE snapshot=?1",[name])?;
+        tx.execute(
+            "INSERT INTO entries SELECT parent,name,ino FROM snapshot_entries WHERE snapshot=?1",
+            [name],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn gc(&mut self, compact: bool) -> Result<GcReport> {
+        let object_bytes = || -> Result<u64> {
+            let mut total = 0;
+            for entry in fs::read_dir(self.root.join("objects"))? {
+                let entry = entry?;
+                if entry.file_type()?.is_file()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|n| n.strip_suffix(".xorb"))
+                        .is_some_and(|s| hash::from_hex(s).is_ok())
+                {
+                    total += entry.metadata()?.len();
+                }
+            }
+            Ok(total)
+        };
+        let before_object_bytes = object_bytes()?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM contents WHERE NOT EXISTS(SELECT 1 FROM inodes WHERE content=contents.id) AND NOT EXISTS(SELECT 1 FROM snapshot_nodes WHERE content=contents.id)",[])?;
+        tx.execute("DELETE FROM chunks WHERE NOT EXISTS(SELECT 1 FROM file_chunks WHERE file_chunks.hash=chunks.hash)",[])?;
+        if compact {
+            let keys: Vec<String> = tx
+                .prepare("SELECT hash FROM chunks ORDER BY xorb,idx")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut pack = Pack::default();
+            for hex in keys {
+                let data = read_chunk(&tx, &self.root, &hex)?;
+                let record = xorb::encode(&data)?;
+                if pack.bytes.len() + record.len() > xorb::MAX_XORB {
+                    save_pack(&tx, &self.root, &mut pack)?;
+                }
+                pack.add(hash::from_hex(&hex)?, data.len() as u64, record);
+            }
+            save_pack(&tx, &self.root, &mut pack)?;
+        }
+        tx.execute(
+            "DELETE FROM xorbs WHERE NOT EXISTS(SELECT 1 FROM chunks WHERE chunks.xorb=xorbs.id)",
+            [],
+        )?;
+        tx.commit()?;
+        let referenced: HashSet<String> = self
+            .conn
+            .prepare("SELECT id FROM xorbs")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut report = GcReport {
+            removed_objects: 0,
+            reclaimed_bytes: 0,
+            before_object_bytes,
+            after_object_bytes: 0,
+            chunks_remaining: self.stats()?.unique_chunks,
+        };
+        for entry in fs::read_dir(self.root.join("objects"))? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(id) = name.to_str().and_then(|s| s.strip_suffix(".xorb")) else {
+                continue;
+            };
+            if hash::from_hex(id).is_ok()
+                && !referenced.contains(id)
+                && entry.file_type()?.is_file()
+            {
+                fs::remove_file(entry.path())?;
+                report.removed_objects += 1;
+            }
+        }
+        sync_dir(&self.root.join("objects"))?;
+        report.after_object_bytes = object_bytes()?;
+        report.reclaimed_bytes = report
+            .before_object_bytes
+            .saturating_sub(report.after_object_bytes);
+        Ok(report)
+    }
+    pub fn fsck(&self) -> Result<FsckReport> {
+        let check: String = self
+            .conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+        if check != "ok" {
+            return Err(Error::Corrupt(check));
+        }
+        if self
+            .conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_some()
+        {
+            return Err(Error::Corrupt("foreign key check failed".into()));
+        }
+        let mut report = FsckReport {
+            xorbs_verified: 0,
+            chunks_verified: 0,
+            recipes_verified: 0,
+        };
+        let objects: Vec<(String, u64)> = self
+            .conn
+            .prepare("SELECT id,size FROM xorbs")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, size) in objects {
+            hash::from_hex(&id)?;
+            let mut file = File::open(self.root.join("objects").join(format!("{id}.xorb")))?;
+            if file.metadata()?.len() != size || size > xorb::MAX_XORB as u64 {
+                return Err(Error::Corrupt(format!("object length: {id}")));
+            }
+            let records: Vec<(u64, String, u64, u64, u64)> = self
+                .conn
+                .prepare(
+                    "SELECT idx,hash,len,offset,stored FROM xorb_chunks WHERE xorb=?1 ORDER BY idx",
+                )?
+                .query_map([&id], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut chunks = Vec::new();
+            let mut position = 0;
+            for (expected_idx, (idx, hex, len, offset, stored)) in records.into_iter().enumerate() {
+                let (data, n) = xorb::decode(&mut file)?
+                    .ok_or_else(|| Error::Corrupt("truncated object".into()))?;
+                let h = hash::chunk_hash(&data);
+                if idx != expected_idx as u64
+                    || position != offset
+                    || n != stored
+                    || data.len() as u64 != len
+                    || hash::to_hex(&h) != hex
+                {
+                    return Err(Error::Corrupt(format!("object record integrity: {id}")));
+                }
+                position += n;
+                chunks.push((h, len));
+                report.chunks_verified += 1;
+            }
+            if position != size || hash::to_hex(&hash::xorb_hash(&chunks)) != id {
+                return Err(Error::Corrupt(format!("Xorb hash mismatch: {id}")));
+            }
+            report.xorbs_verified += 1;
+        }
+        let recipes: Vec<(String, u64)> = self
+            .conn
+            .prepare("SELECT id,size FROM contents")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, size) in recipes {
+            let records: Vec<(u64, u64, u64, String)> = self
+                .conn
+                .prepare(
+                    "SELECT idx,offset,len,hash FROM file_chunks WHERE content=?1 ORDER BY idx",
+                )?
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut chunks = Vec::new();
+            let mut position = 0;
+            for (i, (idx, offset, len, hex)) in records.into_iter().enumerate() {
+                let data = read_chunk(&self.conn, &self.root, &hex)?;
+                if idx != i as u64 || offset != position || data.len() as u64 != len {
+                    return Err(Error::Corrupt(format!("recipe offset/length: {id}")));
+                }
+                chunks.push((hash::from_hex(&hex)?, len));
+                position += len;
+            }
+            if position != size || hash::to_hex(&hash::file_hash(&chunks)) != id {
+                return Err(Error::Corrupt(format!("file hash mismatch: {id}")));
+            }
+            report.recipes_verified += 1;
+        }
+        let bad_nodes: u64 = self.conn.query_row("SELECT COUNT(*) FROM inodes i LEFT JOIN contents c ON c.id=i.content WHERE (i.kind=1 AND (c.id IS NULL OR i.size<>c.size)) OR (i.kind=3 AND (i.target IS NULL OR i.size<>length(i.target)))",[],|r| r.get(0))?;
+        if bad_nodes != 0 {
+            return Err(Error::Corrupt("inode content or size mismatch".into()));
+        }
+        for sql in [
+            "SELECT COUNT(*) FROM chunks c JOIN xorb_chunks p ON c.xorb=p.xorb AND c.idx=p.idx WHERE c.hash<>p.hash",
+            "SELECT COUNT(*) FROM inodes WHERE ino=1 AND kind<>2",
+            "SELECT COUNT(*) FROM entries e JOIN inodes p ON p.ino=e.parent WHERE p.kind<>2 OR e.ino=1 OR length(e.name)=0 OR length(e.name)>255 OR instr(e.name,x'2f')>0 OR instr(e.name,x'00')>0 OR e.name IN (x'2e',x'2e2e')",
+            "SELECT COUNT(*) FROM inodes i WHERE i.kind=2 AND (SELECT COUNT(*) FROM entries WHERE ino=i.ino)>1",
+            "WITH RECURSIVE reachable(ino) AS (VALUES(1) UNION SELECT e.ino FROM entries e JOIN reachable r ON e.parent=r.ino) SELECT COUNT(*) FROM entries WHERE parent NOT IN reachable",
+            "SELECT COUNT(*) FROM snapshot_nodes i LEFT JOIN contents c ON c.id=i.content WHERE (i.kind=1 AND (c.id IS NULL OR i.size<>c.size)) OR (i.kind=3 AND (i.target IS NULL OR i.size<>length(i.target)))",
+            "SELECT COUNT(*) FROM snapshot_entries e LEFT JOIN snapshot_nodes p ON p.snapshot=e.snapshot AND p.ino=e.parent LEFT JOIN snapshot_nodes n ON n.snapshot=e.snapshot AND n.ino=e.ino WHERE p.ino IS NULL OR n.ino IS NULL OR p.kind<>2",
+        ] {
+            let count: u64 = self.conn.query_row(sql, [], |r| r.get(0))?;
+            if count != 0 {
+                return Err(Error::Corrupt(
+                    "namespace, snapshot or chunk index invariant failed".into(),
+                ));
+            }
+        }
+        let roots: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM inodes WHERE ino=1 AND kind=2",
+            [],
+            |r| r.get(0),
+        )?;
+        if roots != 1 {
+            return Err(Error::Corrupt("root inode missing".into()));
+        }
+        Ok(report)
+    }
+}

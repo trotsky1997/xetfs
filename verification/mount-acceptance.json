@@ -1,0 +1,30 @@
+{
+  "status": "passed",
+  "system": "Linux-7.0.12-linuxkit-aarch64-with-glibc2.43",
+  "checks": [
+    "streaming writes, random reads, pwrite, fsync",
+    "copy deduplication, hard links, append visibility",
+    "relative symlinks, Unicode and non-UTF8 names",
+    "holes, truncate, chmod and timestamps",
+    "rename replacement and open-unlink lifetime",
+    "paged readdir, recursive removal, directory cycle rejection and fsyncdir",
+    "exclusive repository owner",
+    "unmount and persistent remount",
+    "SIGKILL: fsynced content recovered; unsynced tail excluded"
+  ],
+  "live_stats_before_crash": {
+    "files": 4,
+    "directories": 3,
+    "logical_bytes": 4194325,
+    "recipes": 10,
+    "recipe_bytes": 6291514,
+    "unique_chunks": 43,
+    "unique_chunk_bytes": 2231261,
+    "xorbs": 9,
+    "xorb_bytes": 2231605,
+    "database_bytes": 307200,
+    "snapshots": 0
+  },
+  "bytes_verified": 2097156,
+  "model_sha256": "3bf9ba77addf186f479b1a112f754d582f52646f0c5365b6a00c8837ee5b1926"
+}
