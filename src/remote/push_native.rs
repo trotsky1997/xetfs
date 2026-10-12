@@ -1115,6 +1115,156 @@ mod tests {
     }
 
     #[test]
+    fn multi_xorb_upload_shard_matches_official_serialization() {
+        use xet_core_structures::metadata_shard::{
+            file_structs::{
+                FileDataSequenceEntry, FileDataSequenceHeader, FileMetadataExt,
+                FileVerificationEntry,
+            },
+            shard_format::MDBShardFileHeader,
+            xorb_structs::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader},
+        };
+
+        let first_chunks = [
+            (hash::chunk_hash(b"first xorb chunk one"), 20u64),
+            (hash::chunk_hash(b"first xorb chunk two"), 21u64),
+        ];
+        let second_chunks = [(hash::chunk_hash(b"second xorb chunk"), 18u64)];
+        let first_hash = hash::xorb_hash(&first_chunks);
+        let second_hash = hash::xorb_hash(&second_chunks);
+        let file_chunks = [first_chunks[0], first_chunks[1], second_chunks[0]];
+        let manifest = FileManifest {
+            file_hash: hash::file_hash(&file_chunks),
+            sha256: [0x5a; 32],
+            size: file_chunks.iter().map(|(_, len)| len).sum(),
+            terms: vec![
+                FileTerm {
+                    xorb_hash: first_hash,
+                    unpacked_bytes: 41,
+                    chunk_start: 0,
+                    chunk_end: 2,
+                    verification_hash: hash::verification_hash(&[
+                        first_chunks[0].0,
+                        first_chunks[1].0,
+                    ]),
+                },
+                FileTerm {
+                    xorb_hash: second_hash,
+                    unpacked_bytes: 18,
+                    chunk_start: 0,
+                    chunk_end: 1,
+                    verification_hash: hash::verification_hash(&[second_chunks[0].0]),
+                },
+            ],
+        };
+        let mut first_offset = 0;
+        let first = CasXorbInfo {
+            xorb_hash: first_hash,
+            raw_bytes: 41,
+            disk_bytes: 57,
+            chunks: first_chunks
+                .iter()
+                .map(|(chunk_hash, len)| {
+                    let chunk = CasChunkInfo {
+                        chunk_hash: *chunk_hash,
+                        offset: first_offset,
+                        len: *len as u32,
+                    };
+                    first_offset += *len as u32;
+                    chunk
+                })
+                .collect(),
+        };
+        let second = CasXorbInfo {
+            xorb_hash: second_hash,
+            raw_bytes: 18,
+            disk_bytes: 34,
+            chunks: vec![CasChunkInfo {
+                chunk_hash: second_chunks[0].0,
+                offset: 0,
+                len: 18,
+            }],
+        };
+        let xorbs = vec![first.clone(), second.clone()];
+
+        let actual = serialize_upload_shard(&manifest, &xorbs).unwrap();
+        let mut expected = Vec::new();
+        let header = MDBShardFileHeader {
+            footer_size: 0,
+            ..MDBShardFileHeader::default()
+        };
+        header.serialize(&mut expected).unwrap();
+
+        let file_header = FileDataSequenceHeader::new(manifest.file_hash.into(), 2, true, true);
+        file_header.serialize(&mut expected).unwrap();
+        for term in &manifest.terms {
+            FileDataSequenceEntry::new(
+                term.xorb_hash.into(),
+                term.unpacked_bytes,
+                term.chunk_start,
+                term.chunk_end,
+            )
+            .serialize(&mut expected)
+            .unwrap();
+        }
+        for term in &manifest.terms {
+            FileVerificationEntry::new(term.verification_hash.into())
+                .serialize(&mut expected)
+                .unwrap();
+        }
+        FileMetadataExt::new(manifest.sha256.into())
+            .serialize(&mut expected)
+            .unwrap();
+        FileDataSequenceHeader::bookend()
+            .serialize(&mut expected)
+            .unwrap();
+        for xorb in &xorbs {
+            let mut metadata = XorbChunkSequenceHeader::new(
+                xorb.xorb_hash.into(),
+                xorb.chunks.len(),
+                xorb.raw_bytes,
+            );
+            metadata.num_bytes_on_disk = xorb.disk_bytes;
+            MDBXorbInfo {
+                metadata,
+                chunks: xorb
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        XorbChunkSequenceEntry::new(
+                            chunk.chunk_hash.into(),
+                            chunk.len,
+                            chunk.offset,
+                        )
+                    })
+                    .collect(),
+            }
+            .serialize(&mut expected)
+            .unwrap();
+        }
+        XorbChunkSequenceHeader::bookend()
+            .serialize(&mut expected)
+            .unwrap();
+
+        assert_eq!(actual, expected);
+        let mut input = Cursor::new(actual);
+        let parsed =
+            xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard::from_reader(
+                &mut input, true, true,
+            )
+            .unwrap();
+        assert_eq!(parsed.num_files(), 1);
+        assert_eq!(parsed.num_xorb(), 2);
+        let file = parsed.file(0).unwrap();
+        assert_eq!(file.num_entries(), 2);
+        assert_eq!(file.entry(0).xorb_hash, first_hash.into());
+        assert_eq!(file.entry(0).chunk_index_start, 0);
+        assert_eq!(file.entry(0).chunk_index_end, 2);
+        assert_eq!(file.entry(1).xorb_hash, second_hash.into());
+        assert_eq!(file.metadata_ext().unwrap().sha256, manifest.sha256.into());
+    }
+
+    #[test]
     fn upload_shard_rejects_duplicate_or_overlong_entries() {
         let hash = [1; 32];
         let manifest = FileManifest {
