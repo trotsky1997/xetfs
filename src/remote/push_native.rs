@@ -267,7 +267,27 @@ pub(super) fn push(
         .send()
         .map_err(|error| anyhow::anyhow!("Hub commit request failed: {}", error.without_url()))?;
     if !response.status().is_success() {
-        bail!("Hub commit request returned HTTP {}", response.status());
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .or_else(|| response.headers().get("x-amzn-trace-id"))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response_bytes(response, CAS_ERROR_BODY_LIMIT, "Hub commit error body")
+            .unwrap_or_default();
+        let excerpt = response_excerpt(&body);
+        bail!(
+            "Hub commit request returned HTTP {status}{}{}",
+            request_id
+                .map(|value| format!(" (request id {value})"))
+                .unwrap_or_default(),
+            if excerpt.is_empty() {
+                String::new()
+            } else {
+                format!(": {excerpt}")
+            }
+        );
     }
     let commit: CommitInfo = response.json().context("decode Hub commit response")?;
     if commit.commit_oid.as_deref().is_none_or(str::is_empty) {
@@ -971,6 +991,14 @@ fn response_bytes(
         "{description} exceeds its size limit"
     );
     Ok(bytes)
+}
+
+fn response_excerpt(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n' || *character == '\t')
+        .take(1024)
+        .collect()
 }
 
 fn append_segments(url: &mut Url, segments: &[&str]) -> anyhow::Result<()> {
