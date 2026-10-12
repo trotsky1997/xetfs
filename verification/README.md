@@ -4,7 +4,7 @@
 
 | 验证 | 环境 | 结果与证据 |
 | --- | --- | --- |
-| 格式、Clippy、Rust 测试、release 构建 | macOS 26 / Darwin 25.5，ARM64，Rust 1.98 | 完整测试 31 项通过；native Hub Xet CAS 上传与 MDB shard 偏移回归测试覆盖；[最新实现 GitHub CI](https://github.com/trotsky1997/xetfs/actions/runs/38214453272) |
+| 格式、Clippy、Rust 测试、release 构建、Linux FUSE 挂载验收 | GitHub Actions：macOS、Ubuntu、Linux FUSE | 提交 `1c75b54e6433ec3d5ccf2e36ef44fbf7fa184025` 的三个 job 全部通过；[CI 运行记录](https://github.com/trotsky1997/xetfs/actions/runs/38221185791)；本机 macOS 完整测试 31 项通过 |
 | Clippy、Rust 测试、release 构建 | Ubuntu 26.04.1，ARM64，Rust 1.98 | 25 项测试通过；[日志](linux-checks.log) |
 | ARM64 随仓库二进制刷新 | macOS ARM64 / Debian 12 ARM64，Rust 1.98.1 | 两个 release 二进制均从当前源码重建；init/put/cat/fsck 与去重冒烟验证通过，Linux 真实 FUSE/远程 FUSE 验收通过；Linux 最高 GLIBC 符号为 `GLIBC_2.34`，依赖 `libgcc_s.so.1`；校验文件：[SHA256SUMS](../bin/SHA256SUMS)，构建元数据：[build.json](build.json) |
 | 官方样本 | 63,527,244 字节 CSV、官方 Xorb、固定 dataset revision | 796 个分块边界和块哈希全部一致；文件/Xorb 哈希一致；重建字节一致；[JSON](official-reference.json) |

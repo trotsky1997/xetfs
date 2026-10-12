@@ -33,5 +33,17 @@
   "binary_sha256": {
     "xetfs-linux-arm64": "97c7256ec4f30f965dea0a7b708d35f0b859d4e59434f7e971e858c573b5f18d",
     "xetfs-macos-arm64": "a28e223602948d9f4e53f73c1ac59fa2c3d9da5d0ab70d7ce207c10f09a6817b"
+  },
+  "github_actions": {
+    "workflow": "main CI",
+    "run_id": 38221185791,
+    "url": "https://github.com/trotsky1997/xetfs/actions/runs/38221185791",
+    "head_sha": "1c75b54e6433ec3d5ccf2e36ef44fbf7fa184025",
+    "conclusion": "success",
+    "jobs": [
+      "rust (macos-latest)",
+      "rust (ubuntu-latest)",
+      "fuse"
+    ]
   }
 }
