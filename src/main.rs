@@ -140,6 +140,9 @@ enum RemoteCommand {
         /// Replace local files when the Hub file differs.
         #[arg(long)]
         force: bool,
+        /// Maximum number of concurrent Hub file transfers (1-64).
+        #[arg(long, default_value_t = 8, value_parser = parse_workers)]
+        workers: usize,
     },
     /// Upload this local namespace as one Hub commit.
     Push {
@@ -170,6 +173,16 @@ enum HubRepoType {
     Dataset,
     Space,
     Kernel,
+}
+fn parse_workers(value: &str) -> std::result::Result<usize, String> {
+    let workers = value
+        .parse::<usize>()
+        .map_err(|_| "workers must be an integer between 1 and 64".to_owned())?;
+    if (1..=64).contains(&workers) {
+        Ok(workers)
+    } else {
+        Err("workers must be between 1 and 64".to_owned())
+    }
 }
 impl HubRepoType {
     fn as_str(self) -> &'static str {
@@ -441,13 +454,18 @@ fn main() -> Result<()> {
             SnapshotCommand::Restore { name } => fs.restore(&name)?,
         },
         Command::Remote { command } => match command {
-            RemoteCommand::Pull { hub, force } => json(&xetfs::remote::pull(
+            RemoteCommand::Pull {
+                hub,
+                force,
+                workers,
+            } => json(&xetfs::remote::pull(
                 &mut fs,
                 &hub.repo_id,
                 hub.repo_type.as_str(),
                 &hub.revision,
                 hub.prefix.as_deref(),
                 force,
+                workers,
             )?)?,
             RemoteCommand::Push { hub, message } => json(&xetfs::remote::push(
                 &fs,

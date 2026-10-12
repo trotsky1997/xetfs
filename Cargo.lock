@@ -3308,6 +3308,7 @@ dependencies = [
  "fs2",
  "fuser",
  "gearhash",
+ "globset",
  "hf-hub",
  "libc",
  "lz4_flex 0.11.6",

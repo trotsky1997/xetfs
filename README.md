@@ -66,7 +66,7 @@ $XETFS_BIN --repo ./demo.repo mv /models/copy.txt /models/renamed.txt
 hf auth login
 $XETFS_BIN --repo ./demo.repo init
 $XETFS_BIN --repo ./demo.repo remote pull owner/dataset \
-  --repo-type dataset --revision main --prefix train
+  --repo-type dataset --revision main --prefix train --workers 8
 $XETFS_BIN --repo ./demo.repo ls /train
 $XETFS_BIN --repo ./demo.repo remote push owner/dataset \
   --repo-type dataset --revision main --prefix train \
@@ -74,6 +74,8 @@ $XETFS_BIN --repo ./demo.repo remote push owner/dataset \
 ```
 
 `--prefix` 是 Hub 仓库内的相对目录，导入后在本地保留同一路径；push 时选择本地同名目录，上传到 Hub 同一路径。pull 遇到已存在且 Xet 文件哈希与长度都相同的文件会跳过；其他同名文件需要 `--force` 才会覆盖。push 只新增或更新文件，不会删除 Hub 上多余的文件；Hub 不存储空目录，符号链接会跳过并计入结果。传输完成后数据保存在本地仓库，因此后续读取不依赖网络；当前 FUSE 挂载本身仍挂载本地仓库。
+
+pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 到 64，默认 8。报告中的 `workers` 记录本次配置。
 
 Hub 客户端负责授权、Xet CAS 传输和 Hub commit 格式。Hub 判定为 Xet/LFS 的文件经 Xet shard/CAS 路径上传；其他小文件按 Hub 的常规 inline 路径处理。XetFS 使用本地 Xet 算法重新摄取下载字节，并把本地文件内容交给官方客户端上传；本地 SQLite 仓库格式不会直接作为 Hub shard 上传。
 

@@ -14,11 +14,13 @@ use std::{
 };
 
 const IO_BLOCK: usize = 1024 * 1024;
+const MAX_REMOTE_WORKERS: usize = 64;
 
 #[derive(Debug, serde::Serialize)]
 pub struct PullReport {
     pub repository: String,
     pub revision: String,
+    pub workers: usize,
     pub files_downloaded: u64,
     pub files_skipped: u64,
     pub bytes_downloaded: u64,
@@ -95,8 +97,13 @@ pub fn pull(
     revision: &str,
     prefix: Option<&str>,
     force: bool,
+    workers: usize,
 ) -> anyhow::Result<PullReport> {
     validate_prefix(prefix)?;
+    anyhow::ensure!(
+        (1..=MAX_REMOTE_WORKERS).contains(&workers),
+        "remote pull workers must be between 1 and {MAX_REMOTE_WORKERS}"
+    );
     let repo = open_repo(repo_id, repo_type)?;
     let entries = match prefix {
         Some(path) => repo
@@ -168,29 +175,49 @@ pub fn pull(
         planned.push((remote_path, target, size, skip));
     }
 
-    let staging = tempfile::tempdir().context("create temporary Hub download directory")?;
-    let mut staged = Vec::new();
+    let mut staged_plan = Vec::new();
     let mut files_skipped = 0u64;
     for (remote_path, target, expected_size, skip) in planned {
         if skip {
             files_skipped += 1;
             continue;
         }
-        let downloaded = repo
-            .download_file()
-            .filename(remote_path.clone())
-            .local_dir(staging.path().to_path_buf())
+        staged_plan.push((remote_path, target, expected_size));
+    }
+
+    let mut staged = Vec::with_capacity(staged_plan.len());
+    let staging = if staged_plan.is_empty() {
+        None
+    } else {
+        Some(tempfile::tempdir().context("create temporary Hub download directory")?)
+    };
+    if let Some(staging) = &staging {
+        let allow_patterns = staged_plan
+            .iter()
+            .map(|(remote_path, _, _)| globset::escape(remote_path))
+            .collect();
+        let snapshot_dir = repo
+            .snapshot_download()
             .revision(revision.to_owned())
+            .allow_patterns(allow_patterns)
+            .local_dir(staging.path().to_path_buf())
             .force_download(true)
+            .max_workers(workers)
             .send()
-            .with_context(|| format!("download {remote_path} through Hugging Face Xet"))?;
-        let actual_size = fs::metadata(&downloaded)
-            .with_context(|| format!("inspect downloaded file {remote_path}"))?
-            .len();
-        if actual_size != expected_size {
-            bail!("downloaded {remote_path} has size {actual_size}, expected {expected_size}");
+            .context("download selected files through Hugging Face Xet")?;
+        for (remote_path, target, expected_size) in staged_plan {
+            let downloaded = snapshot_dir.join(&remote_path);
+            let metadata = fs::metadata(&downloaded)
+                .with_context(|| format!("inspect downloaded file {remote_path}"))?;
+            if !metadata.is_file() {
+                bail!("downloaded path {remote_path} is not a regular file");
+            }
+            let actual_size = metadata.len();
+            if actual_size != expected_size {
+                bail!("downloaded {remote_path} has size {actual_size}, expected {expected_size}");
+            }
+            staged.push((remote_path, target, downloaded, actual_size));
         }
-        staged.push((remote_path, target, downloaded, actual_size));
     }
 
     let mut bytes_downloaded = 0u64;
@@ -208,6 +235,7 @@ pub fn pull(
     Ok(PullReport {
         repository: repo_id.to_owned(),
         revision: revision.to_owned(),
+        workers,
         files_downloaded: staged.len() as u64,
         files_skipped,
         bytes_downloaded,

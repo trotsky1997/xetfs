@@ -1,0 +1,216 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64",
+    "model": "Mac17,8",
+    "cpu": "Apple M5 Pro"
+  },
+  "repository": "xet-team/xet-spec-reference-files",
+  "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "source_revision": "0dac364e097f408e4f662d62eaaa1120b03b32ed-plus-working-tree",
+  "method": "Alternating runs of the same release binary using the bulk snapshot path with one, four, and eight workers. Each pull uses a fresh local repository; timing covers remote transfer, local XetFS import, and commit, while CSV export and fsck run outside the timer.",
+  "trials": 3,
+  "modes": {
+    "workers_1": 15.412788958,
+    "workers_4": 6.366749249999998,
+    "workers_8": 6.276891874999997
+  },
+  "one_to_eight_worker_speedup": 2.455481035030575,
+  "eight_worker_time_reduction_percent": 59.27478218183232,
+  "prior_serial_implementation": {
+    "status": "excluded",
+    "reason": "The previously published binary consistently returned ENOENT while opening the staged .gitattributes file for this revision; its timing is not comparable."
+  },
+  "integrity": {
+    "expected_csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+    "all_trials_csv_sha256_matched": true,
+    "all_trials_fsck_passed": true
+  },
+  "runs": [
+    {
+      "mode": "workers_1",
+      "workers": 1,
+      "pull_seconds": 15.412788958,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 1,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 1
+    },
+    {
+      "mode": "workers_4",
+      "workers": 4,
+      "pull_seconds": 6.149195666000001,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 4,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 1
+    },
+    {
+      "mode": "workers_8",
+      "workers": 8,
+      "pull_seconds": 6.904583207999998,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 8,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 1
+    },
+    {
+      "mode": "workers_4",
+      "workers": 4,
+      "pull_seconds": 7.116811833000003,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 4,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 2
+    },
+    {
+      "mode": "workers_8",
+      "workers": 8,
+      "pull_seconds": 5.6523536250000035,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 8,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 2
+    },
+    {
+      "mode": "workers_1",
+      "workers": 1,
+      "pull_seconds": 13.379264999999997,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 1,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 2
+    },
+    {
+      "mode": "workers_8",
+      "workers": 8,
+      "pull_seconds": 6.276891874999997,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 8,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 3
+    },
+    {
+      "mode": "workers_1",
+      "workers": 1,
+      "pull_seconds": 15.704214958000001,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 1,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 3
+    },
+    {
+      "mode": "workers_4",
+      "workers": 4,
+      "pull_seconds": 6.366749249999998,
+      "pull_report": {
+        "repository": "xet-team/xet-spec-reference-files",
+        "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+        "workers": 4,
+        "files_downloaded": 16,
+        "files_skipped": 0,
+        "bytes_downloaded": 78840265
+      },
+      "csv_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+      "fsck": {
+        "xorbs_verified": 14,
+        "chunks_verified": 1041,
+        "recipes_verified": 15
+      },
+      "trial": 3
+    }
+  ],
+  "scope_note": "Measures client-side download and local import while varying worker count on one host and public repository. It does not establish throughput superiority over Hugging Face server-side CAS.",
+  "binary_sha256": "eeb0274385ed9a21b6aed3e0bdbb7076ff5ecfa8bde2e09b00322b66724ee96b"
+}
