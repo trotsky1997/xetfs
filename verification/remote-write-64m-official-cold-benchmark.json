@@ -1,0 +1,26 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "writer": "huggingface_hub.HfApi.upload_file with hf_xet",
+  "huggingface_hub_version": "1.8.0",
+  "repository": "di-zhang-fdu/xet-debug",
+  "repository_private": false,
+  "initial_revision": "3fd5886e6975e0dea3fbb170d15c08336a017a34",
+  "commit_oid": "710686e571dfc6d5bd4a335e199d1d2d1616e1e1",
+  "path": "xetfs-acceptance/official-20261012T092607Z-b74f2485ca/payload.bin",
+  "bytes": 67108864,
+  "seed": 379120272985,
+  "sha256": "45e27a8098b9f645c5272f67f2712d3ad3324cc53611fb9fd42d026931a0102e",
+  "official_upload_seconds": 26.330832959000002,
+  "remote_file_size": 67108864,
+  "official_hf_download_readback": {
+    "passed": true,
+    "sha256": "45e27a8098b9f645c5272f67f2712d3ad3324cc53611fb9fd42d026931a0102e",
+    "elapsed_seconds": 9.290817583000003
+  }
+}

@@ -42,6 +42,9 @@ pub struct PushReport {
     pub symlinks_skipped: u64,
     pub bytes_uploaded: u64,
     pub native_cas_upload_workers: Option<usize>,
+    pub native_cas_xorbs_uploaded: Option<u64>,
+    pub native_cas_xorbs_skipped: Option<u64>,
+    pub native_cas_xorb_upload_seconds: Option<f64>,
     pub commit_oid: Option<String>,
     pub commit_url: Option<String>,
 }
@@ -404,6 +407,9 @@ fn push_official(
         symlinks_skipped: skipped_symlinks,
         bytes_uploaded,
         native_cas_upload_workers: None,
+        native_cas_xorbs_uploaded: None,
+        native_cas_xorbs_skipped: None,
+        native_cas_xorb_upload_seconds: None,
         commit_oid: result.commit_oid,
         commit_url: result.commit_url,
     })

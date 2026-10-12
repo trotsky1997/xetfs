@@ -36,9 +36,9 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_payload(path: Path, size: int) -> str:
+def write_payload(path: Path, size: int, seed: int) -> str:
     digest = hashlib.sha256()
-    rng = random.Random(0x5845544653)
+    rng = random.Random(seed)
     with path.open("wb") as destination:
         remaining = size
         while remaining:
@@ -55,6 +55,7 @@ def main() -> None:
     parser.add_argument("repo_id", help="Target Hugging Face dataset, for example owner/name")
     parser.add_argument("--revision", default="main")
     parser.add_argument("--size-mib", type=int, default=12)
+    parser.add_argument("--seed", type=int, default=0x5845544653)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--report", type=Path, required=True)
@@ -78,7 +79,7 @@ def main() -> None:
         root = Path(temporary)
         local_repo = root / "local.xetfs"
         payload = root / "payload.bin"
-        expected_sha256 = write_payload(payload, size)
+        expected_sha256 = write_payload(payload, size, args.seed)
 
         run_text([str(binary), "--repo", str(local_repo), "init"])
         run_text([str(binary), "--repo", str(local_repo), "mkdir", "-p", f"/{prefix}"])
@@ -195,11 +196,15 @@ def main() -> None:
             "xetfs_full_file_staging_bytes": 0,
             "native_push_seconds": native_push_seconds,
             "native_cas_upload_workers": push.get("native_cas_upload_workers"),
+            "native_cas_xorbs_uploaded": push.get("native_cas_xorbs_uploaded"),
+            "native_cas_xorbs_skipped": push.get("native_cas_xorbs_skipped"),
+            "native_cas_xorb_upload_seconds": push.get("native_cas_xorb_upload_seconds"),
             "initial_revision": before.sha,
             "commit_oid": commit_oid,
             "commit_url": push.get("commit_url"),
             "path": file_path,
             "bytes": size,
+            "seed": args.seed,
             "sha256": expected_sha256,
             "local_fsck": fsck,
             "remote_file_size": remote_file.size,

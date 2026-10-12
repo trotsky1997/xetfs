@@ -20,10 +20,10 @@ use std::{
     io::Read,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const PREUPLOAD_SAMPLE_SIZE: usize = 512;
@@ -52,6 +52,11 @@ struct PreuploadResponse {
 struct PreuploadFile {
     path: String,
     upload_mode: String,
+}
+
+#[derive(Deserialize)]
+struct LfsBatchResponse {
+    transfer: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -109,6 +114,21 @@ struct CasChunkInfo {
 struct PendingXorb {
     id: String,
     xorb: UploadXorb,
+}
+
+#[derive(Default)]
+struct XorbUploadStats {
+    uploaded: usize,
+    skipped: usize,
+    observed_disk_bytes: HashMap<String, u32>,
+}
+
+impl XorbUploadStats {
+    fn merge(&mut self, other: Self) {
+        self.uploaded += other.uploaded;
+        self.skipped += other.skipped;
+        self.observed_disk_bytes.extend(other.observed_disk_bytes);
+    }
 }
 
 pub(super) fn push(
@@ -191,8 +211,35 @@ pub(super) fn push(
         }
     }
 
+    // Hub's LFS batch negotiation is part of the Xet write protocol, not an
+    // optional optimization. In particular, it registers the SHA-256/size
+    // pair before the LFS pointer is committed. The official Hub client does
+    // this before uploading any Xet CAS objects.
+    let lfs_objects = sources
+        .iter()
+        .zip(&manifests)
+        .filter_map(|(source, manifest)| {
+            manifest
+                .as_ref()
+                .map(|manifest| (hex(&manifest.sha256), source.local.size))
+        })
+        .collect::<Vec<_>>();
+    if !lfs_objects.is_empty()
+        && lfs_batch_transfer(
+            &client,
+            &endpoint,
+            &token,
+            repo_id,
+            repo_type,
+            revision,
+            &lfs_objects,
+        )? != Some("xet".to_owned())
+    {
+        return super::push_official(fs, repo_id, repo_type, revision, prefix, commit_message);
+    }
+
     // Validate every local Xorb and file recipe before the first remote write.
-    let xorb_metadata = load_xorb_metadata(fs, &xorb_ids)?;
+    let mut xorb_metadata = load_xorb_metadata(fs, &xorb_ids)?;
     for manifest in manifests.iter().flatten() {
         let cas_infos = manifest_xorb_infos(manifest, &xorb_metadata)?;
         validate_manifest_xorbs(manifest, &cas_infos)?;
@@ -201,7 +248,8 @@ pub(super) fn push(
     // CAS objects are content-addressed and independent across files. Upload
     // them in bounded parallel batches before writing the per-file shards.
     let mut xet_token: Option<CasToken> = None;
-    upload_xorbs(
+    let xorb_upload_started = Instant::now();
+    let xorb_upload_stats = upload_xorbs(
         fs,
         &client,
         &endpoint,
@@ -210,10 +258,11 @@ pub(super) fn push(
         repo_type,
         revision,
         &xorb_ids,
-        &xorb_metadata,
+        &mut xorb_metadata,
         &mut xet_token,
         workers,
     )?;
+    let xorb_upload_seconds = xorb_upload_started.elapsed().as_secs_f64();
 
     let mut operations = Vec::with_capacity(sources.len());
     let mut bytes_uploaded = 0u64;
@@ -301,6 +350,9 @@ pub(super) fn push(
         symlinks_skipped: skipped_symlinks,
         bytes_uploaded,
         native_cas_upload_workers: Some(workers),
+        native_cas_xorbs_uploaded: Some(xorb_upload_stats.uploaded as u64),
+        native_cas_xorbs_skipped: Some(xorb_upload_stats.skipped as u64),
+        native_cas_xorb_upload_seconds: Some(xorb_upload_seconds),
         commit_oid: commit.commit_oid,
         commit_url: commit.commit_url,
     })
@@ -372,6 +424,98 @@ fn preupload_modes(
         .into_iter()
         .map(|file| (format!("/{}", file.path), file.upload_mode))
         .collect())
+}
+
+fn lfs_batch_transfer(
+    client: &Client,
+    endpoint: &str,
+    token: &str,
+    repo_id: &str,
+    repo_type: &str,
+    revision: &str,
+    objects: &[(String, u64)],
+) -> anyhow::Result<Option<String>> {
+    let url = lfs_batch_url(endpoint, repo_id, repo_type)?;
+    let payload = json!({
+        "operation": "upload",
+        "transfers": ["basic", "multipart", "xet"],
+        "objects": objects.iter().map(|(oid, size)| json!({"oid": oid, "size": size})).collect::<Vec<_>>(),
+        "hash_algo": "sha256",
+        "ref": {"name": revision},
+    });
+    let response = client
+        .post(url)
+        .bearer_auth(token)
+        .header(header::ACCEPT, "application/vnd.git-lfs+json")
+        .header(header::CONTENT_TYPE, "application/vnd.git-lfs+json")
+        .json(&payload)
+        .send()
+        .map_err(|error| {
+            anyhow::anyhow!("Hub LFS batch request failed: {}", error.without_url())
+        })?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response_bytes(response, CAS_ERROR_BODY_LIMIT, "Hub LFS batch error body")
+            .unwrap_or_default();
+        let excerpt = response_excerpt(&body);
+        bail!(
+            "Hub LFS batch request returned HTTP {status}{}",
+            if excerpt.is_empty() {
+                String::new()
+            } else {
+                format!(": {excerpt}")
+            }
+        );
+    }
+    let result: LfsBatchResponse = response.json().context("decode Hub LFS batch response")?;
+    Ok(result.transfer)
+}
+
+fn lfs_batch_url(endpoint: &str, repo_id: &str, repo_type: &str) -> anyhow::Result<Url> {
+    let prefix = match repo_type {
+        "model" => "",
+        "dataset" => "datasets/",
+        "space" => "spaces/",
+        "kernel" => "kernels/",
+        _ => bail!("repo type must be model, dataset, space, or kernel"),
+    };
+    let (owner, name) = hf_hub::split_id(repo_id);
+    anyhow::ensure!(
+        !name.is_empty(),
+        "invalid Hugging Face repository id: {repo_id}"
+    );
+    let mut url = Url::parse(endpoint.trim_end_matches('/'))
+        .context("HF_ENDPOINT must be a valid absolute URL")?;
+    anyhow::ensure!(
+        url.scheme() == "https" || url.host_str() == Some("localhost"),
+        "HF_ENDPOINT must use HTTPS"
+    );
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("Hub endpoint cannot accept URL path segments"))?;
+        segments.pop_if_empty();
+        if !prefix.is_empty() {
+            segments.push(prefix.trim_end_matches('/'));
+        }
+        if !owner.is_empty() {
+            segments.push(owner);
+        }
+        let mut name_parts = name.split('/').peekable();
+        while let Some(part) = name_parts.next() {
+            if name_parts.peek().is_none() {
+                segments.push(&format!("{part}.git"));
+            } else {
+                segments.push(part);
+            }
+        }
+        segments
+            .push("info")
+            .push("lfs")
+            .push("objects")
+            .push("batch");
+    }
+    Ok(url)
 }
 
 fn build_manifest(source: &Source) -> anyhow::Result<FileManifest> {
@@ -465,12 +609,13 @@ fn upload_xorbs(
     repo_type: &str,
     revision: &str,
     ids: &BTreeSet<String>,
-    metadata: &HashMap<String, CasXorbInfo>,
+    metadata: &mut HashMap<String, CasXorbInfo>,
     cas_token: &mut Option<CasToken>,
     workers: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<XorbUploadStats> {
     let mut pending = Vec::new();
     let mut pending_bytes = 0usize;
+    let mut totals = XorbUploadStats::default();
     for id in ids {
         let expected_bytes = metadata
             .get(id)
@@ -480,7 +625,7 @@ fn upload_xorbs(
             && (pending.len() >= workers
                 || pending_bytes.saturating_add(expected_bytes) > MAX_PARALLEL_XORB_UPLOAD_BYTES)
         {
-            upload_xorb_batch(
+            totals.merge(upload_xorb_batch(
                 std::mem::take(&mut pending),
                 client,
                 endpoint,
@@ -490,7 +635,7 @@ fn upload_xorbs(
                 revision,
                 cas_token,
                 workers,
-            )?;
+            )?);
             pending_bytes = 0;
         }
 
@@ -506,9 +651,16 @@ fn upload_xorbs(
             xorb,
         });
     }
-    upload_xorb_batch(
+    totals.merge(upload_xorb_batch(
         pending, client, endpoint, hub_token, repo_id, repo_type, revision, cas_token, workers,
-    )
+    )?);
+    for (id, disk_bytes) in &totals.observed_disk_bytes {
+        metadata
+            .get_mut(id)
+            .with_context(|| format!("missing local CAS metadata for Xorb {id}"))?
+            .disk_bytes = *disk_bytes;
+    }
+    Ok(totals)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -522,18 +674,100 @@ fn upload_xorb_batch(
     revision: &str,
     cas_token: &mut Option<CasToken>,
     workers: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<XorbUploadStats> {
     if batch.is_empty() {
-        return Ok(());
+        return Ok(XorbUploadStats::default());
     }
     let token = ensure_write_token(
         client, endpoint, hub_token, repo_id, repo_type, revision, cas_token,
     )?
     .clone();
+    let uploaded = AtomicUsize::new(0);
+    let skipped = AtomicUsize::new(0);
+    let observed_disk_bytes = Mutex::new(HashMap::new());
     upload_bounded(batch, workers, |pending| {
-        upload_xorb(client, &token, pending.xorb)
-            .with_context(|| format!("upload Xet CAS Xorb {}", pending.id))
+        let result = xorb_head_state(client, &token, &pending.id)
+            .with_context(|| format!("check Xet CAS Xorb {}", pending.id))?;
+        match result {
+            XorbHeadState::Present(content_length) => {
+                record_observed_xorb_size(&observed_disk_bytes, &pending.id, content_length)?;
+                skipped.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            XorbHeadState::Missing | XorbHeadState::Unsupported => {
+                let id = pending.id.clone();
+                let uploaded_here = upload_xorb(client, &token, pending.xorb)
+                    .with_context(|| format!("upload Xet CAS Xorb {id}"))?;
+                if uploaded_here {
+                    uploaded.fetch_add(1, Ordering::Relaxed);
+                } else if result == XorbHeadState::Missing
+                    && let XorbHeadState::Present(content_length) =
+                        xorb_head_state(client, &token, &id)?
+                {
+                    record_observed_xorb_size(&observed_disk_bytes, &id, content_length)?;
+                }
+                Ok(())
+            }
+        }
+    })?;
+    Ok(XorbUploadStats {
+        uploaded: uploaded.load(Ordering::Relaxed),
+        skipped: skipped.load(Ordering::Relaxed),
+        observed_disk_bytes: observed_disk_bytes
+            .into_inner()
+            .map_err(|_| anyhow::anyhow!("observed Xorb size state poisoned"))?,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum XorbHeadState {
+    Present(Option<u64>),
+    Missing,
+    Unsupported,
+}
+
+fn classify_xorb_head(
+    status: StatusCode,
+    content_length: Option<u64>,
+) -> anyhow::Result<XorbHeadState> {
+    if status.is_success() {
+        return Ok(XorbHeadState::Present(content_length));
+    }
+    if status == StatusCode::NOT_FOUND {
+        return Ok(XorbHeadState::Missing);
+    }
+    if matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+    ) {
+        return Ok(XorbHeadState::Unsupported);
+    }
+    bail!("CAS Xorb existence check returned HTTP {status}")
+}
+
+fn xorb_head_state(client: &Client, token: &CasToken, id: &str) -> anyhow::Result<XorbHeadState> {
+    let mut url = Url::parse(&token.cas_url).context("invalid Xet CAS endpoint")?;
+    append_segments(&mut url, &["v1", "xorbs", "default", id])?;
+    let response = client
+        .head(url)
+        .timeout(Duration::from_secs(30))
+        .bearer_auth(&token.access_token)
+        .send()
+        .map_err(|error| {
+            anyhow::anyhow!("CAS Xorb existence request failed: {}", error.without_url())
+        })?;
+    let content_length = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .map(|value| {
+            value
+                .to_str()
+                .context("CAS Xorb Content-Length is not valid text")?
+                .parse::<u64>()
+                .context("CAS Xorb Content-Length is not a valid byte count")
+        })
+        .transpose()?;
+    classify_xorb_head(response.status(), content_length)
 }
 
 fn upload_bounded<T, F>(items: Vec<T>, workers: usize, upload: F) -> anyhow::Result<()>
@@ -728,7 +962,7 @@ fn request_write_token(
     Ok(token)
 }
 
-fn upload_xorb(client: &Client, token: &CasToken, xorb: UploadXorb) -> anyhow::Result<()> {
+fn upload_xorb(client: &Client, token: &CasToken, xorb: UploadXorb) -> anyhow::Result<bool> {
     let id = hash::to_hex(&xorb.hash);
     let mut url = Url::parse(&token.cas_url).context("invalid Xet CAS endpoint")?;
     append_segments(&mut url, &["v1", "xorbs", "default", &id])?;
@@ -751,8 +985,11 @@ fn upload_xorb(client: &Client, token: &CasToken, xorb: UploadXorb) -> anyhow::R
                 bail!("CAS Xorb upload failed: {}", error.without_url());
             }
             Ok(response) if response.status().is_success() => {
-                let _: Value = response.json().context("decode CAS Xorb upload response")?;
-                return Ok(());
+                let result: Value = response.json().context("decode CAS Xorb upload response")?;
+                return result
+                    .get("was_inserted")
+                    .and_then(Value::as_bool)
+                    .context("CAS Xorb upload response omitted was_inserted");
             }
             Ok(response) => {
                 let status = response.status();
@@ -800,6 +1037,27 @@ fn upload_xorb(client: &Client, token: &CasToken, xorb: UploadXorb) -> anyhow::R
         "CAS Xorb upload failed after {CAS_UPLOAD_MAX_ATTEMPTS} attempts for {id} ({} bytes): {last_error}",
         body_len
     )
+}
+
+fn record_observed_xorb_size(
+    observed_disk_bytes: &Mutex<HashMap<String, u32>>,
+    id: &str,
+    content_length: Option<u64>,
+) -> anyhow::Result<()> {
+    let Some(content_length) = content_length else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        content_length > 0,
+        "CAS Xorb has an empty stored representation"
+    );
+    let disk_bytes =
+        u32::try_from(content_length).context("stored CAS Xorb exceeds shard format")?;
+    observed_disk_bytes
+        .lock()
+        .map_err(|_| anyhow::anyhow!("observed Xorb size state poisoned"))?
+        .insert(id.to_owned(), disk_bytes);
+    Ok(())
 }
 
 fn upload_shard(client: &Client, token: &CasToken, shard: &[u8]) -> anyhow::Result<()> {
@@ -891,7 +1149,10 @@ fn serialize_upload_shard(file: &FileManifest, xorbs: &[CasXorbInfo]) -> anyhow:
         output.extend_from_slice(&term.verification_hash);
         output.extend_from_slice(&[0u8; 16]);
     }
-    output.extend_from_slice(&file.sha256);
+    // Xet's DataHash stores canonical hashes as four little-endian u64 words.
+    // The LFS OID remains conventional SHA-256 hex, but the shard metadata
+    // extension must use the DataHash byte layout expected by xet-core.
+    output.extend_from_slice(&sha256_data_hash_bytes(&file.sha256));
     output.extend_from_slice(&[0u8; 16]);
     append_bookend(&mut output);
 
@@ -932,6 +1193,16 @@ fn serialize_upload_shard(file: &FileManifest, xorbs: &[CasXorbInfo]) -> anyhow:
 fn append_bookend(output: &mut Vec<u8>) {
     output.extend_from_slice(&[0xff; 32]);
     output.extend_from_slice(&[0u8; 16]);
+}
+
+fn sha256_data_hash_bytes(sha256: &[u8; 32]) -> [u8; 32] {
+    let mut output = [0u8; 32];
+    let (output_words, _) = output.as_chunks_mut::<8>();
+    let (sha256_words, _) = sha256.as_chunks::<8>();
+    for (destination, source) in output_words.iter_mut().zip(sha256_words) {
+        *destination = u64::from_be_bytes(*source).to_le_bytes();
+    }
+    output
 }
 
 fn commit_body(message: &str, operations: Vec<Value>) -> anyhow::Result<Vec<u8>> {
@@ -1076,13 +1347,61 @@ mod tests {
     }
 
     #[test]
+    fn xorb_head_check_skips_matching_objects_and_falls_back_safely() {
+        assert_eq!(
+            classify_xorb_head(StatusCode::OK, Some(64)).unwrap(),
+            XorbHeadState::Present(Some(64))
+        );
+        assert_eq!(
+            classify_xorb_head(StatusCode::OK, Some(63)).unwrap(),
+            XorbHeadState::Present(Some(63))
+        );
+        assert_eq!(
+            classify_xorb_head(StatusCode::OK, None).unwrap(),
+            XorbHeadState::Present(None)
+        );
+        assert_eq!(
+            classify_xorb_head(StatusCode::NOT_FOUND, None).unwrap(),
+            XorbHeadState::Missing
+        );
+        for status in [
+            StatusCode::FORBIDDEN,
+            StatusCode::METHOD_NOT_ALLOWED,
+            StatusCode::NOT_IMPLEMENTED,
+        ] {
+            assert_eq!(
+                classify_xorb_head(status, None).unwrap(),
+                XorbHeadState::Unsupported
+            );
+        }
+        assert!(classify_xorb_head(StatusCode::BAD_GATEWAY, None).is_err());
+    }
+
+    #[test]
+    fn lfs_batch_url_matches_hub_repo_route() {
+        assert_eq!(
+            lfs_batch_url("https://huggingface.co/", "alice/data", "dataset")
+                .unwrap()
+                .as_str(),
+            "https://huggingface.co/datasets/alice/data.git/info/lfs/objects/batch"
+        );
+        assert_eq!(
+            lfs_batch_url("https://hub.example/base", "alice/model", "model")
+                .unwrap()
+                .as_str(),
+            "https://hub.example/base/alice/model.git/info/lfs/objects/batch"
+        );
+    }
+
+    #[test]
     fn upload_shard_roundtrips_with_official_reader() {
         let chunk_hash = hash::chunk_hash(b"protocol-compatible chunk");
         let xorb_hash = hash::xorb_hash(&[(chunk_hash, 25)]);
         let file_hash = hash::file_hash(&[(chunk_hash, 25)]);
+        let sha256 = std::array::from_fn(|index| index as u8);
         let manifest = FileManifest {
             file_hash,
-            sha256: [0x5a; 32],
+            sha256,
             size: 25,
             terms: vec![FileTerm {
                 xorb_hash,
@@ -1112,6 +1431,10 @@ mod tests {
         assert_eq!(parsed.num_files(), 1);
         assert_eq!(parsed.num_xorb(), 1);
         assert!(parsed.has_file_verification());
+        assert_eq!(
+            parsed.file(0).unwrap().metadata_ext().unwrap().sha256,
+            xet_core_structures::metadata_shard::Sha256::from_be_bytes(sha256)
+        );
     }
 
     #[test]
@@ -1135,7 +1458,7 @@ mod tests {
         let file_chunks = [first_chunks[0], first_chunks[1], second_chunks[0]];
         let manifest = FileManifest {
             file_hash: hash::file_hash(&file_chunks),
-            sha256: [0x5a; 32],
+            sha256: std::array::from_fn(|index| (31 - index) as u8),
             size: file_chunks.iter().map(|(_, len)| len).sum(),
             terms: vec![
                 FileTerm {
@@ -1212,9 +1535,11 @@ mod tests {
                 .serialize(&mut expected)
                 .unwrap();
         }
-        FileMetadataExt::new(manifest.sha256.into())
-            .serialize(&mut expected)
-            .unwrap();
+        FileMetadataExt::new(xet_core_structures::metadata_shard::Sha256::from_be_bytes(
+            manifest.sha256,
+        ))
+        .serialize(&mut expected)
+        .unwrap();
         FileDataSequenceHeader::bookend()
             .serialize(&mut expected)
             .unwrap();
@@ -1261,7 +1586,10 @@ mod tests {
         assert_eq!(file.entry(0).chunk_index_start, 0);
         assert_eq!(file.entry(0).chunk_index_end, 2);
         assert_eq!(file.entry(1).xorb_hash, second_hash.into());
-        assert_eq!(file.metadata_ext().unwrap().sha256, manifest.sha256.into());
+        assert_eq!(
+            file.metadata_ext().unwrap().sha256,
+            xet_core_structures::metadata_shard::Sha256::from_be_bytes(manifest.sha256)
+        );
     }
 
     #[test]

@@ -96,11 +96,11 @@ pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 �
 
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
 
-`remote push --workers` 控制本地不同 Xorb 对象的并发 CAS 上传，默认 8、范围 1–64。上传按最多 128 MiB 的批次读取本地对象，先验证所有文件重建清单，再并发发送去重后的 Xorb，最后写 metadata shard 和一次 Hub commit；打开写句柄或回退到官方流式客户端时，此参数不改变其上传并发策略。JSON 结果会标明 native CAS 实际 worker 配置。
+`remote push --workers` 控制本地不同 Xorb 对象的并发 CAS 上传，默认 8、范围 1–64。上传按最多 128 MiB 的批次读取本地对象，先验证所有文件重建清单，再通过 CAS HEAD 检查已存在的 Xorb，仅上传缺失对象；若服务端已有另一种有效压缩序列化，会把 CAS 返回的实际对象长度写入 shard 元数据。不支持 HEAD 的旧端点会兼容回退到上传。打开写句柄或回退到官方流式客户端时，此参数不改变其上传并发策略。JSON 结果记录 native CAS worker 数、上传/跳过的 Xorb 数量和 Xorb 阶段耗时。
 
 Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直接按 4 MiB 对齐窗口读取 Xet CAS；HTTP 连接池与短期 token 在一次挂载生命周期中复用，窗口缓存在有界 LRU 内存中。它是只读挂载，默认缓存 256 MiB（`--cache-mib` 可设为 4–16384），`--workers` 控制每个窗口的 CAS 并发请求数。指定 `--prefix` 时该子目录成为挂载根。仅展示 Hub 标记为 Xet 存储的常规文件；inline/LFS 非 Xet 文件会在启动摘要中计数并略过。文件树是挂载时的 revision 元数据快照，不会跟随分支更新；范围读取验证 reconstruction、Xorb 记录与 chunk 哈希，只有完整文件读取时才能验证整个文件根哈希。卸载方式与本地 FUSE 相同。
 
-上传前，XetFS 通过 Hub preupload 接口选择 Xet/LFS 或 inline 模式；native 路径取得短期 Xet write token，验证本地 Xorb、chunk 范围、文件根哈希和 SHA-256 后上传 Xorb 与 metadata shard，最后通过 Hub commit API 写入文件指针。小型 inline 文件仍以 Hub 支持的 base64 文件操作提交；打开写句柄的文件和超出 inline 内存上限的常规文件由官方客户端流式处理。下载继续使用官方 Hub 客户端；本地 SQLite 格式不会上传到 Hub。
+上传前，XetFS 通过 Hub preupload 接口选择 Xet/LFS 或 inline 模式；native 路径还会用 Git LFS batch 注册文件 SHA-256 与长度并协商 Xet transfer，然后取得短期 Xet write token，验证本地 Xorb、chunk 范围、文件根哈希和 SHA-256 后上传 Xorb 与 metadata shard，最后通过 Hub commit API 写入文件指针。小型 inline 文件仍以 Hub 支持的 base64 文件操作提交；打开写句柄的文件和超出 inline 内存上限的常规文件由官方客户端流式处理。下载继续使用官方 Hub 客户端；本地 SQLite 格式不会上传到 Hub。
 
 ## 挂载
 
