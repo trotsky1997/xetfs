@@ -8,6 +8,8 @@ pub enum Error {
     Errno(i32),
     #[error("corrupt repository: {0}")]
     Corrupt(String),
+    #[error("S3 backend: {0}")]
+    Backend(String),
     #[error("repository is already open (including a mounted filesystem)")]
     Busy,
     #[error("{0}")]
@@ -21,7 +23,7 @@ impl Error {
             Self::Busy => libc::EBUSY,
             Self::Io(e) => e.raw_os_error().unwrap_or(libc::EIO),
             Self::Invalid(_) => libc::EINVAL,
-            Self::Sql(_) | Self::Corrupt(_) => libc::EIO,
+            Self::Sql(_) | Self::Corrupt(_) | Self::Backend(_) => libc::EIO,
         }
     }
 }

@@ -10,6 +10,8 @@ pub mod remote_cas;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub mod remote_fuse;
 mod repository;
+mod s3_backend;
+pub mod s3_server;
 pub mod xorb;
 
 pub use error::{Error, Result};
@@ -17,3 +19,4 @@ pub use filesystem::{FileSystem, SetAttr};
 pub use repository::{
     DirEntry, FsckReport, GcReport, Kind, Node, Reconstruction, Repository, Snapshot, Stats, Term,
 };
+pub use s3_backend::S3BackendConfig;

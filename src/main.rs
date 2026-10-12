@@ -4,10 +4,11 @@ use std::{
     ffi::OsStr,
     fs::File,
     io::{self, Read, Write},
+    net::SocketAddr,
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
-use xetfs::{FileSystem, Kind, Repository, SetAttr, chunker::Chunker, hash};
+use xetfs::{FileSystem, Kind, Repository, S3BackendConfig, SetAttr, chunker::Chunker, hash};
 
 #[derive(Parser)]
 #[command(version, about = "XetFS: content-addressed deduplicating filesystem")]
@@ -129,6 +130,31 @@ enum Command {
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
+    },
+    /// Configure the S3 Xorb backend or serve the XetFS namespace over S3.
+    S3 {
+        #[command(subcommand)]
+        command: S3Command,
+    },
+}
+#[derive(Subcommand)]
+enum S3Command {
+    /// Store Xorb objects in an S3 bucket; metadata and a local cache stay in this repository.
+    ConfigureBackend {
+        bucket: String,
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long)]
+        endpoint_url: Option<String>,
+        #[arg(long, default_value_t = false)]
+        path_style: bool,
+    },
+    /// Run an authenticated S3-compatible API server over the repository namespace.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:9000")]
+        listen: SocketAddr,
     },
 }
 #[derive(Subcommand)]
@@ -349,6 +375,50 @@ fn main() -> Result<()> {
         Command::Init => {
             let repo = Repository::init(&cli.repo)?;
             return json(&serde_json::json!({"repository":repo.path(),"format_version":1}));
+        }
+        Command::S3 {
+            command:
+                S3Command::ConfigureBackend {
+                    bucket,
+                    region,
+                    prefix,
+                    endpoint_url,
+                    path_style,
+                },
+        } => {
+            let mut repository = Repository::open(&cli.repo)
+                .with_context(|| format!("open repository {}", cli.repo.display()))?;
+            let config = S3BackendConfig {
+                bucket: bucket.clone(),
+                region: region.clone(),
+                prefix: prefix.clone(),
+                endpoint_url: endpoint_url.clone(),
+                path_style: *path_style,
+            };
+            repository.configure_s3_backend(&config)?;
+            return json(&serde_json::json!({
+                "repository": repository.path(),
+                "bucket": config.bucket,
+                "region": config.region,
+                "prefix": config.prefix,
+                "endpoint_url": config.endpoint_url,
+                "path_style": config.path_style,
+                "credentials": "AWS SDK credential chain"
+            }));
+        }
+        Command::S3 {
+            command: S3Command::Serve { listen },
+        } => {
+            let access_key = std::env::var("XETFS_S3_ACCESS_KEY_ID")
+                .context("set XETFS_S3_ACCESS_KEY_ID for the S3 gateway")?;
+            let secret_key = std::env::var("XETFS_S3_SECRET_ACCESS_KEY")
+                .context("set XETFS_S3_SECRET_ACCESS_KEY for the S3 gateway")?;
+            let fs = FileSystem::new(
+                Repository::open(&cli.repo)
+                    .with_context(|| format!("open repository {}", cli.repo.display()))?,
+            );
+            return xetfs::s3_server::serve(fs, *listen, access_key, secret_key)
+                .context("run S3 gateway");
         }
         Command::Remote {
             command:
@@ -614,7 +684,9 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Command::Init | Command::Hash { .. } | Command::InspectXorb { .. } => unreachable!(),
+        Command::Init | Command::Hash { .. } | Command::InspectXorb { .. } | Command::S3 { .. } => {
+            unreachable!()
+        }
     }
     Ok(())
 }

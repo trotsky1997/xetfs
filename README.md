@@ -16,6 +16,8 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
 | Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持按范围读取、Linux 只读按需远程挂载、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
+| S3 兼容入口 | 经 SigV4 认证提供桶/对象 CRUD、ListObjectsV2、Range GET 和分段上传；对象写入 XetFS 并参与去重 |
+| S3 对象后端 | 可将不可变 Xorb 对象写穿到 S3，并在本地对象缓存缺失时回源；SQLite 元数据仍留在本地仓库 |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
 ## 构建与运行
@@ -97,6 +99,43 @@ pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 �
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
 
 `remote push --workers` 控制本地不同 Xorb 对象的并发 CAS 上传，默认 8、范围 1–64。上传按最多 128 MiB 的批次读取本地对象，先验证所有文件重建清单，再通过 CAS HEAD 检查已存在的 Xorb，仅上传缺失对象；若服务端已有另一种有效压缩序列化，会把 CAS 返回的实际对象长度写入 shard 元数据。不支持 HEAD 的旧端点会兼容回退到上传。打开写句柄或回退到官方流式客户端时，此参数不改变其上传并发策略。JSON 结果记录 native CAS worker 数、上传/跳过的 Xorb 数量和 Xorb 阶段耗时。
+
+## S3 接口
+
+XetFS 提供 S3 兼容网关，也能把 Xorb 内容对象写入 S3。网关使用静态 SigV4 凭证；后端使用 AWS SDK 标准凭证链（环境变量、profile、容器/实例角色等）。凭证只通过环境或 AWS 配置提供，不写入仓库：
+
+```sh
+export XETFS_S3_ACCESS_KEY_ID=xetfs-local
+export XETFS_S3_SECRET_ACCESS_KEY='replace-with-a-long-random-secret'
+$XETFS_BIN --repo ./demo.repo s3 serve --listen 127.0.0.1:9000
+```
+
+另一个终端可用 AWS CLI、SDK 或支持 path-style S3 endpoint 的客户端访问。所有桶对应 XetFS 虚拟根目录下的目录；对象键被编码到桶内保留的 `.xetfs-s3-objects` 子树，避免 `../`、重复斜杠等 S3 键被解释成文件系统路径：
+
+```sh
+AWS_ACCESS_KEY_ID="$XETFS_S3_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$XETFS_S3_SECRET_ACCESS_KEY" \
+AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://models
+AWS_ACCESS_KEY_ID="$XETFS_S3_ACCESS_KEY_ID" \
+AWS_SECRET_ACCESS_KEY="$XETFS_S3_SECRET_ACCESS_KEY" \
+AWS_DEFAULT_REGION=us-east-1 aws --endpoint-url http://127.0.0.1:9000 \
+  s3 cp ./weights.bin s3://models/checkpoints/weights.bin
+```
+
+网关支持建桶/删桶、列桶、HeadBucket、Put/Get/Head/DeleteObject、批量删除、ListObjectsV2、Range GET 和 Create/Upload/Complete/Abort Multipart Upload。S3 ACL、版本控制、策略、对象标签、加密配置及其他管理 API 当前未实现。网关使用单组共享凭证，暂不提供按桶/对象授权策略；未完成的 multipart 会话仅驻留进程内存，服务重启后需要客户端重新上传。ListObjectsV2 每次扫描该桶的 XetFS S3 键映射，适合功能验证和中小规模桶；对象数据通过临时文件流入仓库，读取按 1 MiB 窗口流式返回。
+
+要将仓库 Xorb 对象写入 S3，先用 AWS SDK 凭证链设置 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` 等凭证，并预先创建目标桶，再执行：
+
+```sh
+$XETFS_BIN --repo ./demo.repo s3 configure-backend xetfs-cas \
+  --region us-east-1 --prefix team-a/xetfs
+```
+
+可用 `--endpoint-url http://127.0.0.1:9000` 对接兼容服务，必要时加 `--path-style`。配置命令会先校验桶并上传仓库现有的 Xorb，再把无凭证的配置写到 `s3-backend.json`。后续 Xorb 在 SQLite 发布索引前写入 S3；读取遇到本地 Xorb 缓存缺失时会下载并验证 Xet Xorb 哈希后再缓存。`gc` 也会列出配置前缀并删除后端里不再被仓库元数据引用的 Xorb，因此需要 `HeadBucket`、`ListBucket`、`GetObject`、`PutObject` 和 `DeleteObject` 权限。
+
+这个后端当前只远端保存内容寻址的 Xorb 对象。`metadata.sqlite`、进程锁和命名空间元数据仍是本地状态，因此多个机器不能直接共享同一仓库目录或把这个设置当成分布式多写者元数据服务。仓库本地缓存也会保留已写入的 Xorb；清除缓存后，首次读取会从 S3 回源。
+
+部署 S3 网关时，若该网关仓库同时启用了 S3 对象后端，后端必须指向独立的 S3 服务；不要把后端 endpoint 配成同一网关，否则网关写入的 Xorb 会再次进入自身。
 
 Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直接按 4 MiB 对齐窗口读取 Xet CAS；HTTP 连接池与短期 token 在一次挂载生命周期中复用，窗口缓存在有界 LRU 内存中。它是只读挂载，默认缓存 256 MiB（`--cache-mib` 可设为 4–16384），`--workers` 控制每个窗口的 CAS 并发请求数。指定 `--prefix` 时该子目录成为挂载根。仅展示 Hub 标记为 Xet 存储的常规文件；inline/LFS 非 Xet 文件会在启动摘要中计数并略过。文件树是挂载时的 revision 元数据快照，不会跟随分支更新；范围读取验证 reconstruction、Xorb 记录与 chunk 哈希，只有完整文件读取时才能验证整个文件根哈希。卸载方式与本地 FUSE 相同。
 

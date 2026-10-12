@@ -34,6 +34,10 @@ flowchart LR
   L --> U[remote_fuse.rs: 只读远程 FUSE]
   U --> V[4 MiB 窗口 LRU]
   V --> O
+  W[AWS CLI / SDK / rclone] <--> X[s3_server.rs: SigV4 S3 API]
+  X --> D
+  G[S3-compatible object store] <--> Y[s3_backend.rs: AWS SDK]
+  H --> Y
 ```
 
 ## 模块
@@ -48,6 +52,8 @@ flowchart LR
 | `remote.rs` | Hub revision 枚举、官方客户端拉取、写入 fallback 与本地/远端路径映射 |
 | `remote/push_native.rs` | 已提交文件的 Hub preupload、Xet write token、原始 Xorb CAS 上传、MDB shard 编码和 Hub LFS commit |
 | `remote_cas.rs` | Hub 文件元数据、读 token、v1/v2 CAS reconstruction、有界并发 signed multi-range Xorb 下载与范围重建，以及 Hub API URL/token 辅助 |
+| `s3_server.rs` | SigV4 S3 网关；将桶映射为根目录子目录，将对象键编码到保留子树；支持对象 CRUD、Range、ListObjectsV2 和 multipart 上传 |
+| `s3_backend.rs` | AWS SDK S3 Xorb 对象后端、读穿本地缓存、校验回填及 S3 后端配置；所有凭证由 AWS SDK 凭证链提供 |
 | `remote_fuse.rs` | Linux 只读远程挂载：revision 文件树、Xet 文件 inode、固定窗口 LRU 与按需 CAS 范围读取 |
 | `fuse.rs` | Linux FUSE 回调、属性映射、稳定目录句柄与内核权限选项 |
 | `main.rs` | 管理、导入导出、范围读取、哈希、远程同步和挂载命令 |
@@ -86,6 +92,8 @@ repo/
 
 `inodes` 保存 inode 属性及内容配方 ID；`entries` 使用 `(parent_inode, raw_name_bytes)` 作为键。同一 inode 可有多个文件目录项；目录不允许硬链接。根 inode 为 1，其余 inode 使用 SQLite AUTOINCREMENT。
 
+配置 S3 后端时，`s3-backend.json` 只保存 bucket、region、prefix、endpoint 和 path-style 选项，不包含密钥。远端对象键为 `<prefix>/objects/<xorb-hash>.xorb`。AWS SDK 凭证在进程启动时从环境变量、profile 或运行环境凭证源取得。S3 是 Xorb 内容对象的远端副本和回源来源；SQLite namespace、WAL、进程锁和缓存仍在本地，因此它不提供多主元数据、跨机锁或共享仓库语义。
+
 快照复制 inode 和目录项元数据，共享不可变配方。它不是独立的数据备份，底层对象仍属于同一仓库。
 
 ## 写入和持久化
@@ -97,6 +105,8 @@ repo/
 3. 写临时对象并 `sync_all`，以 no-clobber 方式发布，再 fsync 对象目录。
 4. 提交块索引与不可变配方的 SQLite 事务。
 5. 提交 inode 对新配方的引用、长度及时间戳。
+
+启用 S3 后，第 3 步还会先完成同名 Xorb 的 S3 `PutObject`，然后才提交 SQLite 索引。这样远端对象不会早于本地对象成为配方引用，但两边无法组成一个分布式事务；崩溃或本地事务失败可能留下未引用的 S3 Xorb，由 GC 列出配置前缀并清理。读取时先查本地对象缓存；缓存文件不存在则下载远端对象，校验完整 Xorb 编码与 Xorb 哈希后原子写回本地 `objects/`。`fsck` 也会在验证前补回缺失的缓存对象。
 
 旧 inode 配方在新内容完成提交之前始终有效。导入读错误或未完成的事务不会让旧文件指向半个新对象。
 

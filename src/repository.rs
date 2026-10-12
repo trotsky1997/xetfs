@@ -2,6 +2,10 @@ use crate::{
     Error, Result,
     chunker::Chunker,
     hash::{self, Hash},
+    s3_backend::{
+        S3BackendConfig, S3ObjectStore, read_config, verify_and_cache_xorb, verify_xorb_bytes,
+        write_config,
+    },
     xorb,
 };
 use fs2::FileExt;
@@ -137,6 +141,7 @@ pub(crate) fn sync_dir(path: &Path) -> Result<()> {
 pub struct Repository {
     pub(crate) conn: Connection,
     pub(crate) root: PathBuf,
+    object_store: Option<S3ObjectStore>,
     _lock: File,
 }
 
@@ -273,7 +278,12 @@ impl Pack {
         self.bytes.extend(record);
     }
 }
-fn save_pack(tx: &Transaction<'_>, root: &Path, pack: &mut Pack) -> Result<()> {
+fn save_pack(
+    tx: &Transaction<'_>,
+    root: &Path,
+    object_store: Option<&S3ObjectStore>,
+    pack: &mut Pack,
+) -> Result<()> {
     if pack.chunks.is_empty() {
         return Ok(());
     }
@@ -298,6 +308,9 @@ fn save_pack(tx: &Transaction<'_>, root: &Path, pack: &mut Pack) -> Result<()> {
         Err(e) => return Err(e.error.into()),
     }
     sync_dir(&root.join("objects"))?;
+    if let Some(store) = object_store {
+        store.put_xorb(&id, &pack.bytes)?;
+    }
     tx.execute(
         "INSERT OR IGNORE INTO xorbs VALUES (?1,?2)",
         params![id, pack.bytes.len() as u64],
@@ -313,18 +326,18 @@ fn save_pack(tx: &Transaction<'_>, root: &Path, pack: &mut Pack) -> Result<()> {
     *pack = Pack::default();
     Ok(())
 }
-fn read_chunk(conn: &Connection, root: &Path, hex: &str) -> Result<Vec<u8>> {
-    let (object,offset,len,stored): (String,u64,u64,u64) = conn.query_row(
-        "SELECT p.xorb,p.offset,p.len,p.stored FROM chunks c JOIN xorb_chunks p ON p.xorb=c.xorb AND p.idx=c.idx WHERE c.hash=?1",
-        [hex], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+fn read_chunk(
+    conn: &Connection,
+    root: &Path,
+    object_store: Option<&S3ObjectStore>,
+    hex: &str,
+) -> Result<Vec<u8>> {
+    let (object,offset,len,stored,object_size): (String,u64,u64,u64,u64) = conn.query_row(
+        "SELECT p.xorb,p.offset,p.len,p.stored,x.size FROM chunks c JOIN xorb_chunks p ON p.xorb=c.xorb AND p.idx=c.idx JOIN xorbs x ON x.id=p.xorb WHERE c.hash=?1",
+        [hex], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     hash::from_hex(&object)?;
-    read_chunk_record(
-        &root.join("objects").join(format!("{object}.xorb")),
-        offset,
-        len,
-        stored,
-        hex,
-    )
+    let path = verify_and_cache_xorb(root, &object, Some(object_size), object_store)?;
+    read_chunk_record(&path, offset, len, stored, hex)
 }
 impl Repository {
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
@@ -354,6 +367,7 @@ impl Repository {
         Ok(Self {
             conn,
             root,
+            object_store: None,
             _lock: lock,
         })
     }
@@ -384,9 +398,13 @@ impl Repository {
                 fs::remove_file(entry.path())?;
             }
         }
+        let object_store = read_config(&root)?
+            .map(|config| S3ObjectStore::from_config(&config))
+            .transpose()?;
         Ok(Self {
             conn,
             root,
+            object_store,
             _lock: lock,
         })
     }
@@ -399,6 +417,30 @@ impl Repository {
     }
     pub fn path(&self) -> &Path {
         &self.root
+    }
+    /// Configure S3 as the durable Xorb object store and upload all existing objects first.
+    pub fn configure_s3_backend(&mut self, config: &S3BackendConfig) -> Result<()> {
+        config.validate()?;
+        let store = S3ObjectStore::from_config(config)?;
+        store.check_bucket()?;
+        let objects: Vec<(String, u64)> = self
+            .conn
+            .prepare("SELECT id,size FROM xorbs ORDER BY id")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, expected_size) in objects {
+            let bytes = fs::read(self.root.join("objects").join(format!("{id}.xorb")))?;
+            if bytes.len() as u64 != expected_size {
+                return Err(Error::Corrupt(format!(
+                    "Xorb size mismatch while configuring S3: {id}"
+                )));
+            }
+            verify_xorb_bytes(&id, &bytes)?;
+            store.put_xorb(&id, &bytes)?;
+        }
+        write_config(&self.root, config)?;
+        self.object_store = Some(store);
+        Ok(())
     }
     /// Objects become durable before the transaction publishes their index.
     pub fn ingest(&mut self, input: impl Read) -> Result<(String, u64)> {
@@ -429,11 +471,11 @@ impl Repository {
             }
             let record = xorb::encode(&data)?;
             if pack.bytes.len() + record.len() > xorb::MAX_XORB {
-                save_pack(&tx, &self.root, &mut pack)?;
+                save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
             }
             pack.add(h, len, record);
         }
-        save_pack(&tx, &self.root, &mut pack)?;
+        save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
         let id = hash::to_hex(&hash::file_hash(&recipe));
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO contents VALUES (?1,?2)",
@@ -469,7 +511,7 @@ impl Repository {
         })?;
         for row in rows {
             let (hex, start, len) = row?;
-            let data = read_chunk(&self.conn, &self.root, &hex)?;
+            let data = read_chunk(&self.conn, &self.root, self.object_store.as_ref(), &hex)?;
             let from = offset.saturating_sub(start) as usize;
             let to = (end - start).min(len) as usize;
             out.extend_from_slice(&data[from..to]);
@@ -517,6 +559,7 @@ impl Repository {
             }
             hash::from_hex(&chunk_hash)?;
             hash::from_hex(&object_hash)?;
+            verify_and_cache_xorb(&self.root, &object_hash, None, self.object_store.as_ref())?;
             next_offset = next_offset
                 .checked_add(len)
                 .ok_or_else(|| Error::Corrupt("upload recipe size overflow".into()))?;
@@ -552,7 +595,12 @@ impl Repository {
         if expected_size == 0 || expected_size > xorb::MAX_XORB as u64 {
             return Err(Error::Corrupt(format!("invalid Xorb size for {id}")));
         }
-        let path = self.root.join("objects").join(format!("{id}.xorb"));
+        let path = verify_and_cache_xorb(
+            &self.root,
+            id,
+            Some(expected_size),
+            self.object_store.as_ref(),
+        )?;
         let bytes = fs::read(&path)?;
         if bytes.len() as u64 != expected_size {
             return Err(Error::Corrupt(format!("Xorb size changed for {id}")));
@@ -627,7 +675,12 @@ impl Repository {
             .prepare("SELECT hash FROM file_chunks WHERE content=?1 ORDER BY idx")?;
         let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
         for row in rows {
-            output.write_all(&read_chunk(&self.conn, &self.root, &row?)?)?;
+            output.write_all(&read_chunk(
+                &self.conn,
+                &self.root,
+                self.object_store.as_ref(),
+                &row?,
+            )?)?;
         }
         Ok(())
     }
@@ -807,14 +860,14 @@ impl Repository {
                 .collect::<rusqlite::Result<_>>()?;
             let mut pack = Pack::default();
             for hex in keys {
-                let data = read_chunk(&tx, &self.root, &hex)?;
+                let data = read_chunk(&tx, &self.root, self.object_store.as_ref(), &hex)?;
                 let record = xorb::encode(&data)?;
                 if pack.bytes.len() + record.len() > xorb::MAX_XORB {
-                    save_pack(&tx, &self.root, &mut pack)?;
+                    save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
                 }
                 pack.add(hash::from_hex(&hex)?, data.len() as u64, record);
             }
-            save_pack(&tx, &self.root, &mut pack)?;
+            save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
         }
         tx.execute(
             "DELETE FROM xorbs WHERE NOT EXISTS(SELECT 1 FROM chunks WHERE chunks.xorb=xorbs.id)",
@@ -833,6 +886,7 @@ impl Repository {
             after_object_bytes: 0,
             chunks_remaining: self.stats()?.unique_chunks,
         };
+        let mut removed = HashSet::new();
         for entry in fs::read_dir(self.root.join("objects"))? {
             let entry = entry?;
             let name = entry.file_name();
@@ -843,10 +897,21 @@ impl Repository {
                 && !referenced.contains(id)
                 && entry.file_type()?.is_file()
             {
+                if let Some(store) = self.object_store.as_ref() {
+                    store.delete_xorb(id)?;
+                }
                 fs::remove_file(entry.path())?;
-                report.removed_objects += 1;
+                removed.insert(id.to_owned());
             }
         }
+        if let Some(store) = self.object_store.as_ref() {
+            for id in store.list_xorbs()? {
+                if !referenced.contains(&id) && removed.insert(id.clone()) {
+                    store.delete_xorb(&id)?;
+                }
+            }
+        }
+        report.removed_objects = removed.len() as u64;
         sync_dir(&self.root.join("objects"))?;
         report.after_object_bytes = object_bytes()?;
         report.reclaimed_bytes = report
@@ -882,7 +947,9 @@ impl Repository {
             .collect::<rusqlite::Result<_>>()?;
         for (id, size) in objects {
             hash::from_hex(&id)?;
-            let mut file = File::open(self.root.join("objects").join(format!("{id}.xorb")))?;
+            let object_path =
+                verify_and_cache_xorb(&self.root, &id, Some(size), self.object_store.as_ref())?;
+            let mut file = File::open(object_path)?;
             if file.metadata()?.len() != size || size > xorb::MAX_XORB as u64 {
                 return Err(Error::Corrupt(format!("object length: {id}")));
             }
@@ -934,7 +1001,7 @@ impl Repository {
             let mut chunks = Vec::new();
             let mut position = 0;
             for (i, (idx, offset, len, hex)) in records.into_iter().enumerate() {
-                let data = read_chunk(&self.conn, &self.root, &hex)?;
+                let data = read_chunk(&self.conn, &self.root, self.object_store.as_ref(), &hex)?;
                 if idx != i as u64 || offset != position || data.len() as u64 != len {
                     return Err(Error::Corrupt(format!("recipe offset/length: {id}")));
                 }
