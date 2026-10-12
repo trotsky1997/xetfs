@@ -5,6 +5,7 @@ mod filesystem;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub mod fuse;
 pub mod hash;
+pub mod remote;
 mod repository;
 pub mod xorb;
 

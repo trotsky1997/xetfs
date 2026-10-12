@@ -20,6 +20,9 @@ flowchart LR
   H --> K[范围解码与块校验]
   I --> K
   K --> D
+  L[Hugging Face Hub] <--> M[remote.rs / hf-hub / hf-xet]
+  M <--> N[临时传输文件]
+  N <--> D
 ```
 
 ## 模块
@@ -31,8 +34,9 @@ flowchart LR
 | `xorb.rs` | v0 块头、三种压缩类型、解码大小限制 |
 | `repository.rs` | CAS 对象、块索引、不可变文件配方、事务、快照、GC、fsck |
 | `filesystem.rs` | 目录与 inode 语义、共享写暂存、句柄和 lookup 引用生命周期 |
+| `remote.rs` | Hub revision 枚举、通过官方 Xet 客户端下载/上传，以及远端 commit |
 | `fuse.rs` | Linux FUSE 回调、属性映射、稳定目录句柄与内核权限选项 |
-| `main.rs` | 管理、导入导出、范围读取、哈希和挂载命令 |
+| `main.rs` | 管理、导入导出、范围读取、哈希、远程同步和挂载命令 |
 
 ## 算法对应关系
 
@@ -43,6 +47,8 @@ CDC 使用 [Xet chunking](https://huggingface.co/docs/xet/en/chunking)的固定 
 Xorb 使用 [v0 块记录格式](https://huggingface.co/docs/xet/en/xorb)：版本 1 字节、压缩长度 3 字节、压缩类型 1 字节、原始长度 3 字节，长度均 little-endian。每块尝试 raw、LZ4 frame、BG4 + LZ4 并选择最小结果。序列化对象总长限制为 64 MiB。
 
 本地对象是无 footer 的块流。`inspect-xorb` 还接受官方固定样本实际包含的 `XETB` 末尾标记，且要求标记后立即 EOF；不把该观察扩展为对所有官方对象 footer 的支持。官方 shard 格式及服务端协议不在 0.1 的兼容范围内。
+
+Hub 同步由官方 `hf-hub` Rust 客户端执行；它在 Hub 授权后调用官方 `hf-xet` 实现 Xet 文件的 CAS 下载、分块上传及 shard 注册，再提交 Hub 文件指针。XetFS 在下载后把字节导入自己的 Xorb/SQLite 格式；上传前从本地配方读出字节交给该客户端。两套仓库格式保持独立，Hub 不接收 XetFS 的 SQLite 元数据或本地 Xorb 文件。
 
 ## 仓库格式
 
@@ -94,5 +100,7 @@ FUSE 的同一 inode 共享一个磁盘暂存文件。任意句柄读写都观�
 GC 的根包括当前 inode 和快照 inode。删除配方与块索引后，完全空闲的 Xorb 可移除；压实将所有存活块写入新对象并提交新位置，最后删除不再引用的旧对象。任何中断只留下可回收对象。执行 GC 时不能持有打开的文件句柄。
 
 `fsck` 检查 SQLite 完整性、外键、物理 Xorb 内容与哈希、块索引、文件配方偏移及根哈希、inode 长度与主要 namespace/snapshot 约束。它检测问题并返回错误，不自动修复数据。
+
+`remote pull` 固定读取请求的 Hub revision，将匹配的目录树下载到临时目录，检查文件长度后逐项导入本地文件系统。`remote push` 逐文件读取所选本地路径到临时文件，再以一次 Hub commit 上传。push 是文件 upsert，不镜像删除；远程与本地的 revision 不额外记录在 SQLite 中。
 
 数据缓冲上界为一个至多 64 MiB 的编码对象及少量块；导入的配方和已见块集合占用 O(块数) 内存。当前随机写入的提交仍需扫描整个暂存文件，且 FUSE 使用直接 I/O 和串行回调。后续性能方向包括脏区附近 CDC 重同步、块缓存、批量小文件打包与并行编码；这些尚未实现。

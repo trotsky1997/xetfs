@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::{
     ffi::OsStr,
     fs::File,
@@ -125,6 +125,61 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// Transfer a repository revision with Hugging Face Xet.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+}
+#[derive(Subcommand)]
+enum RemoteCommand {
+    /// Download a Hub revision into this local XetFS repository.
+    Pull {
+        #[command(flatten)]
+        hub: HubArgs,
+        /// Replace local files when the Hub file differs.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Upload this local namespace as one Hub commit.
+    Push {
+        #[command(flatten)]
+        hub: HubArgs,
+        /// Commit message on the Hub.
+        #[arg(long, default_value = "Sync from XetFS")]
+        message: String,
+    },
+}
+#[derive(Args)]
+struct HubArgs {
+    /// Hugging Face repository id, such as owner/name.
+    repo_id: String,
+    /// Hugging Face repository kind.
+    #[arg(long, value_enum, default_value = "model")]
+    repo_type: HubRepoType,
+    /// Hub branch, tag, or commit SHA.
+    #[arg(long, default_value = "main")]
+    revision: String,
+    /// Optional repository-relative directory. Pull preserves this prefix locally.
+    #[arg(long)]
+    prefix: Option<String>,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum HubRepoType {
+    Model,
+    Dataset,
+    Space,
+    Kernel,
+}
+impl HubRepoType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Dataset => "dataset",
+            Self::Space => "space",
+            Self::Kernel => "kernel",
+        }
+    }
 }
 #[derive(Subcommand)]
 enum SnapshotCommand {
@@ -384,6 +439,24 @@ fn main() -> Result<()> {
             SnapshotCommand::List => json(&fs.repository().snapshots()?)?,
             SnapshotCommand::Drop { name } => fs.drop_snapshot(&name)?,
             SnapshotCommand::Restore { name } => fs.restore(&name)?,
+        },
+        Command::Remote { command } => match command {
+            RemoteCommand::Pull { hub, force } => json(&xetfs::remote::pull(
+                &mut fs,
+                &hub.repo_id,
+                hub.repo_type.as_str(),
+                &hub.revision,
+                hub.prefix.as_deref(),
+                force,
+            )?)?,
+            RemoteCommand::Push { hub, message } => json(&xetfs::remote::push(
+                &fs,
+                &hub.repo_id,
+                hub.repo_type.as_str(),
+                &hub.revision,
+                hub.prefix.as_deref(),
+                &message,
+            )?)?,
         },
         Command::Mount { mountpoint } => {
             #[cfg(all(target_os = "linux", feature = "fuse"))]

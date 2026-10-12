@@ -756,10 +756,10 @@ impl FileSystem {
                 self.stages.remove(&ino);
             }
         }
-        if let Some(mtime) = attrs.mtime_ns {
-            if let Some(stage) = self.stages.get_mut(&ino) {
-                stage.mtime = mtime;
-            }
+        if let Some(mtime) = attrs.mtime_ns
+            && let Some(stage) = self.stages.get_mut(&ino)
+        {
+            stage.mtime = mtime;
         }
         self.repo.conn.execute("UPDATE inodes SET mode=COALESCE(?1,mode),uid=COALESCE(?2,uid),gid=COALESCE(?3,gid),atime=COALESCE(?4,atime),mtime=COALESCE(?5,mtime),ctime=?6 WHERE ino=?7",params![attrs.mode.map(|m| m&0o7777),attrs.uid,attrs.gid,attrs.atime_ns,attrs.mtime_ns,now_ns(),ino])?;
         self.node(ino)

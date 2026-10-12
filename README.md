@@ -15,11 +15,12 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 文件操作 | 顺序与随机读写、追加、截断、零填充空洞、目录、重命名、硬链接、符号链接 |
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
+| Hub 远程传输 | 通过 Hugging Face 官方 Rust Xet 客户端拉取文件、上传文件并创建 Hub commit |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
 ## 构建与运行
 
-需要 Rust 1.87 或更新版本；本次验证使用 Rust 1.98。`Cargo.lock` 已包含在源码中。
+需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。仓库中的 ARM64 预编译二进制来自上一版，不含下文的 Hub 远程命令；远程同步请使用本源码构建的程序。
 
 ```sh
 cargo build --release --locked
@@ -56,6 +57,25 @@ $XETFS_BIN --repo ./demo.repo ln /models/sample.txt /hard-link
 $XETFS_BIN --repo ./demo.repo ln -s models/sample.txt /symbolic-link
 $XETFS_BIN --repo ./demo.repo mv /models/copy.txt /models/renamed.txt
 ```
+
+## Hugging Face Hub 远程读写
+
+先用 Hugging Face CLI 登录，或按 `hf-hub` 的标准方式提供 `HF_TOKEN`。读取私有仓库需要 read 权限；上传需要 write 权限。`remote pull` 按指定 revision 下载 Xet 文件并导入本地 CAS，`remote push` 将本地文件导出到临时目录，再通过官方 Xet 客户端上传并写入一个 Hub commit：
+
+```sh
+hf auth login
+$XETFS_BIN --repo ./demo.repo init
+$XETFS_BIN --repo ./demo.repo remote pull owner/dataset \
+  --repo-type dataset --revision main --prefix train
+$XETFS_BIN --repo ./demo.repo ls /train
+$XETFS_BIN --repo ./demo.repo remote push owner/dataset \
+  --repo-type dataset --revision main --prefix train \
+  --message "Update training data"
+```
+
+`--prefix` 是 Hub 仓库内的相对目录，导入后在本地保留同一路径；push 时选择本地同名目录，上传到 Hub 同一路径。pull 遇到已存在且 Xet 文件哈希与长度都相同的文件会跳过；其他同名文件需要 `--force` 才会覆盖。push 只新增或更新文件，不会删除 Hub 上多余的文件；Hub 不存储空目录，符号链接会跳过并计入结果。传输完成后数据保存在本地仓库，因此后续读取不依赖网络；当前 FUSE 挂载本身仍挂载本地仓库。
+
+Hub 客户端负责授权、Xet CAS 传输和 Hub commit 格式。Hub 判定为 Xet/LFS 的文件经 Xet shard/CAS 路径上传；其他小文件按 Hub 的常规 inline 路径处理。XetFS 使用本地 Xet 算法重新摄取下载字节，并把本地文件内容交给官方客户端上传；本地 SQLite 仓库格式不会直接作为 Hub shard 上传。
 
 ## 挂载
 
@@ -105,7 +125,7 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 ## 当前边界
 
-- 本地存储后端；HF Hub 鉴权、远程 CAS、全局去重服务以及官方 shard 文件传输尚未实现。SQLite 元数据格式属于 XetFS，不能直接作为官方 shard 上传。
+- Hub 同步目前通过显式 `remote pull` / `remote push` 工作，不提供 Hub 文件的按需远程挂载、双向变更检测或删除镜像。每次传输会在宿主机临时目录暂存文件，峰值临时空间可能接近待传输数据总量。
 - 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。

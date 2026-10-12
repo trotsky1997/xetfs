@@ -1,0 +1,19 @@
+Licenses and notices for XetFS Cargo dependencies.
+
+License overview:
+{{#each overview}}
+- {{{name}}} ({{id}}): {{count}} package(s)
+{{/each}}
+
+{{#each licenses}}
+========================================================================
+{{{name}}} ({{id}})
+Used by:
+{{#each used_by}}
+- {{{crate.name}}} {{crate.version}}{{#if crate.repository}} | {{{crate.repository}}}{{/if}}
+{{/each}}
+
+--- {{id}} ---
+{{{text}}}
+
+{{/each}}

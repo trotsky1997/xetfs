@@ -22,8 +22,8 @@ pub fn chunk_hash(data: &[u8]) -> Hash {
 }
 pub fn to_hex(hash: &Hash) -> String {
     let mut s = String::with_capacity(64);
-    for word in hash.chunks_exact(8) {
-        write!(s, "{:016x}", u64::from_le_bytes(word.try_into().unwrap())).unwrap();
+    for word in hash.as_chunks::<8>().0 {
+        write!(s, "{:016x}", u64::from_le_bytes(*word)).unwrap();
     }
     s
 }
@@ -32,7 +32,7 @@ pub fn from_hex(s: &str) -> Result<Hash> {
         return Err(Error::Invalid("expected a 64-character Xet hash".into()));
     }
     let mut h = [0u8; 32];
-    for (i, word) in h.chunks_exact_mut(8).enumerate() {
+    for (i, word) in h.as_chunks_mut::<8>().0.iter_mut().enumerate() {
         let n = u64::from_str_radix(&s[i * 16..i * 16 + 16], 16)
             .map_err(|e| Error::Invalid(e.to_string()))?;
         word.copy_from_slice(&n.to_le_bytes());
