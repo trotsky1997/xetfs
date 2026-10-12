@@ -1,0 +1,109 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "source_revision": "51210cdd8ddf8b81e7812b891fcdc1319364da7c",
+  "xetfs_binary_sha256": "f4d105c5dc240e493d4b66b828ce5593b2bd3df60c7e173d0dea517c6f106615",
+  "official_cli_version": "1.32.0",
+  "repository": "xet-team/xet-spec-reference-files",
+  "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "file_path": "Electric_Vehicle_Population_Data_20250917.csv",
+  "bytes": 63527244,
+  "expected_sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734",
+  "comparison": "XetFS remote cat direct CAS vs official hf download, fresh isolated caches, alternating order",
+  "xetfs_workers": 1,
+  "official_workers": 1,
+  "runs": [
+    {
+      "run": 1,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.583864916,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 1,
+      "client": "huggingface_cli",
+      "seconds": 3.9066803340000003,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 2,
+      "client": "huggingface_cli",
+      "seconds": 4.713208209000001,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 2,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.9969740839999996,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 3,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.8939105830000003,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 3,
+      "client": "huggingface_cli",
+      "seconds": 4.809949416999999,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 4,
+      "client": "huggingface_cli",
+      "seconds": 4.671492624999999,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 4,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.8938239579999987,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 5,
+      "client": "xetfs_direct_cas",
+      "seconds": 4.157036916999999,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    },
+    {
+      "run": 5,
+      "client": "huggingface_cli",
+      "seconds": 4.005357666000002,
+      "bytes": 63527244,
+      "sha256": "f41255b252f776125f2b657136654e4d4d5d2ccf8ef4db0ec186bd1981b69734"
+    }
+  ],
+  "median_seconds": {
+    "xetfs_direct_cas": 3.8939105830000003,
+    "huggingface_cli": 4.671492624999999
+  },
+  "direct_cas_speedup_vs_official_cli": 1.1996918073555052,
+  "paired_comparison": {
+    "pairs": 5,
+    "xetfs_faster_runs": 4,
+    "median_pairwise_speedup": 1.179194087814356,
+    "pairwise_speedups": {
+      "1": 1.090074661173418,
+      "2": 1.179194087814356,
+      "3": 1.2352490676080834,
+      "4": 1.1997184966213619,
+      "5": 0.9635126523943743
+    }
+  }
+}

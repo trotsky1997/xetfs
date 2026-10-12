@@ -1,0 +1,110 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "source_revision": "51210cdd8ddf8b81e7812b891fcdc1319364da7c",
+  "xetfs_binary_sha256": "f4d105c5dc240e493d4b66b828ce5593b2bd3df60c7e173d0dea517c6f106615",
+  "official_cli_version": "1.32.0",
+  "repository": "xet-team/xet-spec-reference-files",
+  "repo_type": "dataset",
+  "revision": "c4aa3a3f15b1395fff5ce934784bf6c8f2d62de8",
+  "file_path": "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb",
+  "bytes": 14737817,
+  "expected_sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413",
+  "comparison": "XetFS remote cat direct CAS vs official hf download, fresh isolated caches, alternating order",
+  "xetfs_workers": 8,
+  "official_workers": 8,
+  "runs": [
+    {
+      "run": 1,
+      "client": "xetfs_direct_cas",
+      "seconds": 4.746651667,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 1,
+      "client": "huggingface_cli",
+      "seconds": 4.439757667,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 2,
+      "client": "huggingface_cli",
+      "seconds": 6.711323584000002,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 2,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.957453667000003,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 3,
+      "client": "xetfs_direct_cas",
+      "seconds": 4.194453834000001,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 3,
+      "client": "huggingface_cli",
+      "seconds": 4.239044832999998,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 4,
+      "client": "huggingface_cli",
+      "seconds": 4.691256624999998,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 4,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.865400416,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 5,
+      "client": "xetfs_direct_cas",
+      "seconds": 3.949745500000006,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    },
+    {
+      "run": 5,
+      "client": "huggingface_cli",
+      "seconds": 4.441341666999996,
+      "bytes": 14737817,
+      "sha256": "e72f4e05b9c4b96f1c6b2213d93de00ab943585a2f7c049fd127ba72ec1ff413"
+    }
+  ],
+  "median_seconds": {
+    "xetfs_direct_cas": 3.957453667000003,
+    "huggingface_cli": 4.441341666999996
+  },
+  "direct_cas_speedup_vs_official_cli": 1.122272562287965,
+  "paired_comparison": {
+    "pairs": 5,
+    "xetfs_faster_runs": 4,
+    "median_pairwise_speedup": 1.124462745004707,
+    "pairwise_speedups": {
+      "1": 0.9353451608565234,
+      "2": 1.6958691493885776,
+      "3": 1.010630942850901,
+      "4": 1.2136534692710081,
+      "5": 1.124462745004707
+    }
+  }
+}

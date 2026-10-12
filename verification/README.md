@@ -1,6 +1,6 @@
 # 实测记录
 
-日期：2026-10-12，Asia/Shanghai。记录包含本机、Docker、公开 Hugging Face Hub 只读拉取和私有 GitHub Actions 的实际结果。性能对比固定在同一台 Apple M5 Pro 主机，以三次运行中位数比较优化前后的本地 XetFS。
+日期：2026-10-12，Asia/Shanghai。记录包含本机、Docker、公开 Hugging Face Hub 只读拉取和私有 GitHub Actions 的实际结果。本地导入性能使用五组交错配对；CAS 端到端读取对照固定在同一台 Apple M5 Pro 主机，每种配置交错运行五组并使用隔离缓存。
 
 | 验证 | 环境 | 结果与证据 |
 | --- | --- | --- |
@@ -13,7 +13,7 @@
 | Hub 远程写入与双路径回读 | 用户指定的 `di-zhang-fdu/xet-debug` 数据集；macOS ARM64 | 在公开数据集的唯一目录上传 12 MiB 合成 `.bin`，Hub commit `21ee4d72715d98f60eb97ebb9c88cf4104990088`；独立 CAS 和官方 `hf download` 回读 SHA-256 均为 `8b621a…126037a`；XetFS 本地 fsck 验证 200 块；[JSON](remote-write-acceptance.json)；复现脚本：[remote_write_acceptance.py](../scripts/remote_write_acceptance.py) |
 | 可重读流远程写入与双路径回读 | 同一用户指定的公开 dataset；macOS ARM64 | 从本地 CAS 直接流式上传 12 MiB 合成 `.bin`，没有 XetFS 全文件临时副本；CAS 与官方客户端下载的 SHA-256 均为 `8b621a…126037a`；[Hub commit](https://huggingface.co/datasets/di-zhang-fdu/xet-debug/commit/d493abdb11e7af44cb7e0ce0d3ab2b532b385500)；[JSON](remote-write-stream-acceptance.json) |
 | XetFS native Xet CAS 写入与双路径回读 | 用户指定的公开 `di-zhang-fdu/xet-debug` dataset；macOS ARM64 | 已提交的 12 MiB 文件由 XetFS 直接上传不可变 Xorb 和 MDB metadata shard，再写 Hub LFS pointer；独立 CAS 与官方 `hf download` 回读 SHA-256 均为 `8b621a…126037a`，fsck 检查 200 chunks；[Hub commit](https://huggingface.co/datasets/di-zhang-fdu/xet-debug/commit/f9106589e55cba3714851199079839da882e1a4e)；[JSON](remote-write-native-acceptance.json) |
-| CAS 读取性能对照 | 同一 63,527,244 字节公开 Xet 文件；macOS ARM64；官方 `hf` CLI 1.32.0；隔离缓存、交错顺序 | 默认设置各 5 轮：XetFS 1 worker 中位数 4.01 秒，官方 CLI 8 workers 4.44 秒，约 1.11×；匹配配置补测：1/1 为 3.78/4.58 秒，8/8 为 4.02/4.28 秒。每次输出 SHA-256 一致；报告：[默认配置](direct-vs-official-defaults.json)、[8/8](direct-vs-official-cas.json)、[1/1](direct-vs-official-cas-workers-1.json)；脚本：[compare_cas_download.py](../scripts/compare_cas_download.py) |
+| 当前发行版 CAS 读取性能对照 | 同一公开 Xet dataset 中的 63.5 MB CSV 与 14.7 MB Xorb；macOS ARM64；官方 `hf` CLI 1.32.0；隔离缓存、交错配对 | 每种配置 5 轮，全部 SHA-256 一致。CSV：1/1 中位数 3.89/4.67 秒（1.20×），8/8 为 3.93/4.79 秒（1.22×）；Xorb：1/1 为 4.13/4.44 秒（1.07×），8/8 为 3.96/4.44 秒（1.12×）；每个配置下 XetFS 均有 4/5 组配对更快。报告：[CSV 1/1](direct-vs-official-current-1w.json)、[CSV 8/8](direct-vs-official-current-8w.json)、[Xorb 1/1](direct-vs-official-xorb-1w.json)、[Xorb 8/8](direct-vs-official-xorb-8w.json)；脚本：[compare_cas_download.py](../scripts/compare_cas_download.py) |
 | Hub 并发拉取 | 同一 release 二进制、同一公开 revision、每组 3 次交错运行 | 1 worker 中位数 15.41 秒；8 workers 6.28 秒，减少 59.3%；三组均校验 CSV SHA-256 和 fsck；[JSON](remote-parallel-pull.json)；复现实验脚本：[remote_pull_benchmark.py](../scripts/remote_pull_benchmark.py) |
 | 真实 FUSE | Docker Linuxkit 7.0.12，ARM64，root | 读写、链接、目录枚举、元数据、重挂载和 SIGKILL 恢复通过；[JSON](mount-acceptance.json) |
 | 非 root FUSE | 相同 Linux 环境，uid/gid 65534，fusermount3 | 相同挂载流程通过；[JSON](mount-unprivileged.json) |
@@ -28,7 +28,9 @@
 
 Hub 并发性能报告只比较 XetFS 同一传输实现的 worker 配置；旧串行版在当前固定 revision 上连续两次未能打开暂存的 `.gitattributes`，因此未用于性能计算。远程数据受网络和服务端状态影响，报告的加速比只代表本次 Apple M5 Pro 实测，不代表服务端 CAS 性能排名。
 
-CAS 性能对照只比较这台主机、这份固定文件上的完整下载；运行区间有重叠，不能推出对 Hugging Face 服务端的总体优势，也不覆盖不同网络、文件尺寸、仓库或负载。native 写入报告证明 XetFS 自己完成 Xorb CAS 上传、MDB shard 注册和 Git/LFS commit，官方客户端成功下载回读；它建立协议互操作证据，尚未构成跨网络、负载和文件尺寸的服务端总体性能排名。
+CAS 读取对照测量的是两种客户端经同一个 Hub/CAS 服务端的端到端耗时，不是服务端内部吞吐。当前发行版在一台 Apple M5 Pro 上，对两种文件和两种 worker 配置各做 5 组交错配对，XetFS 中位数领先 1.07–1.22×，每组有 4/5 次配对更快；这支持该样本下的客户端性能优势，但样本仍只覆盖一个主机、一个公开仓库和两种文件尺寸，不能推出所有网络、文件尺寸与负载下都领先。native 写入报告证明 XetFS 自己完成 Xorb CAS 上传、MDB shard 注册和 Git/LFS commit，官方客户端成功下载回读；它建立协议互操作证据，尚未构成服务端内部或总体性能排名。
+
+CAS 对照脚本支持指定仓库类型、revision、文件路径、字节数和预期 SHA-256；每轮使用独立 HF 缓存，按交错顺序运行，并校验两个客户端的完整文件内容。
 
 远程写入验收目标为用户指定的公开 dataset。验收只在新的 `xetfs-acceptance/<run-id>/payload.bin` 路径新增合成文件，包括最新 native writer 的 `xetfs-acceptance/20261012T062435Z-81525fbf2e/payload.bin`；未覆盖或删除已有文件，也未调整仓库可见性。
 
