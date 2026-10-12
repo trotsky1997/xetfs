@@ -150,6 +150,20 @@ pub(crate) struct UploadSnapshot {
     source: UploadSnapshotSource,
 }
 
+/// A validated local Xorb ready for direct transfer to the Hugging Face CAS.
+pub(crate) struct UploadXorb {
+    pub(crate) hash: Hash,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) raw_bytes: u64,
+    pub(crate) chunks: Vec<UploadXorbChunk>,
+}
+
+pub(crate) struct UploadXorbChunk {
+    pub(crate) hash: Hash,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+}
+
 #[derive(Clone)]
 enum UploadSnapshotSource {
     Staged(Arc<File>),
@@ -528,6 +542,81 @@ impl Repository {
             },
         })
     }
+
+    /// Read and validate an immutable local Xorb for direct remote upload.
+    pub(crate) fn read_upload_xorb(&self, id: &str) -> Result<UploadXorb> {
+        let expected_hash = hash::from_hex(id)?;
+        let expected_size: u64 =
+            self.conn
+                .query_row("SELECT size FROM xorbs WHERE id=?1", [id], |row| row.get(0))?;
+        if expected_size == 0 || expected_size > xorb::MAX_XORB as u64 {
+            return Err(Error::Corrupt(format!("invalid Xorb size for {id}")));
+        }
+        let path = self.root.join("objects").join(format!("{id}.xorb"));
+        let bytes = fs::read(&path)?;
+        if bytes.len() as u64 != expected_size {
+            return Err(Error::Corrupt(format!("Xorb size changed for {id}")));
+        }
+
+        let mut statement = self.conn.prepare(
+            "SELECT idx,hash,len,offset,stored FROM xorb_chunks WHERE xorb=?1 ORDER BY idx",
+        )?;
+        let rows = statement.query_map([id], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, u64>(4)?,
+            ))
+        })?;
+
+        let mut cursor = std::io::Cursor::new(bytes.as_slice());
+        let mut chunks = Vec::new();
+        let mut hashes_and_lengths = Vec::new();
+        let mut raw_bytes = 0u64;
+        for (row_index, row) in rows.enumerate() {
+            let (index, expected_chunk_hash, expected_len, expected_offset, expected_stored) = row?;
+            if index != row_index as u64 || cursor.position() != expected_offset {
+                return Err(Error::Corrupt(format!("invalid Xorb chunk index for {id}")));
+            }
+            let (data, stored) = xorb::decode(&mut cursor)?
+                .ok_or_else(|| Error::Corrupt(format!("Xorb {id} ended before chunk {index}")))?;
+            let chunk_hash = hash::chunk_hash(&data);
+            if data.len() as u64 != expected_len
+                || stored != expected_stored
+                || hash::to_hex(&chunk_hash) != expected_chunk_hash
+            {
+                return Err(Error::Corrupt(format!(
+                    "Xorb chunk integrity failed for {id}"
+                )));
+            }
+            chunks.push(UploadXorbChunk {
+                hash: chunk_hash,
+                // MDB shard chunk ranges are measured in uncompressed bytes;
+                // expected_offset above is only the physical offset in the
+                // locally encoded (possibly compressed) Xorb object.
+                offset: raw_bytes,
+                len: expected_len,
+            });
+            hashes_and_lengths.push((chunk_hash, expected_len));
+            raw_bytes = raw_bytes
+                .checked_add(expected_len)
+                .ok_or_else(|| Error::Corrupt("Xorb raw size overflow".into()))?;
+        }
+        if chunks.is_empty()
+            || cursor.position() != expected_size
+            || hash::xorb_hash(&hashes_and_lengths) != expected_hash
+        {
+            return Err(Error::Corrupt(format!("Xorb integrity failed for {id}")));
+        }
+        Ok(UploadXorb {
+            hash: expected_hash,
+            bytes,
+            raw_bytes,
+            chunks,
+        })
+    }
     pub fn export_content(&self, id: &str, mut output: impl Write) -> Result<()> {
         self.conn
             .query_row("SELECT 1 FROM contents WHERE id=?1", [id], |_| Ok(()))
@@ -886,5 +975,40 @@ impl Repository {
             return Err(Error::Corrupt("root inode missing".into()));
         }
         Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_xorb_chunk_ranges_use_uncompressed_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = crate::FileSystem::new(Repository::init(dir.path().join("repo")).unwrap());
+        let mut data = vec![0x5a; 256 * 1024];
+        let midpoint = data.len() / 2;
+        data[midpoint..].fill(0x5b);
+        let node = fs.put_file("/compressed", data.as_slice()).unwrap();
+        let content = node.content.as_deref().unwrap();
+        let recipe = fs.repository().reconstruction(content).unwrap();
+        let xorb = fs
+            .repository()
+            .read_upload_xorb(&recipe.terms[0].xorb)
+            .unwrap();
+
+        assert!(xorb.chunks.len() >= 2);
+        let mut raw_offset = 0;
+        for chunk in &xorb.chunks {
+            assert_eq!(chunk.offset, raw_offset);
+            raw_offset += chunk.len;
+        }
+        assert_eq!(raw_offset, xorb.raw_bytes);
+        // The physical compressed offsets differ after the first chunk; this
+        // guards against accidentally serializing local storage offsets into
+        // the public MDB shard's raw byte ranges.
+        assert!(xorb.chunks[1].offset > 0);
+        assert!(xorb.chunks[1].offset > xorb.chunks[0].offset);
+        assert!((xorb.bytes.len() as u64) < xorb.raw_bytes);
     }
 }

@@ -1,0 +1,36 @@
+{
+  "status": "passed",
+  "date": "2026-10-12",
+  "host": {
+    "system": "Darwin",
+    "release": "25.5.0",
+    "architecture": "arm64"
+  },
+  "source_revision": "native-xet-cas-write+raw-offset-fix",
+  "binary_sha256": "e46cb4bb7a1f3ae961f31755887c59200f90f2bad16744a909cfaeec8e659655",
+  "repository": "di-zhang-fdu/xet-debug",
+  "repository_private": false,
+  "upload_source_strategy": "native Xet CAS transfer from committed XetFS Xorbs and a generated metadata shard",
+  "xetfs_full_file_staging_bytes": 0,
+  "initial_revision": "d493abdb11e7af44cb7e0ce0d3ab2b532b385500",
+  "commit_oid": "f9106589e55cba3714851199079839da882e1a4e",
+  "commit_url": "https://huggingface.co/datasets/di-zhang-fdu/xet-debug/commit/f9106589e55cba3714851199079839da882e1a4e",
+  "path": "xetfs-acceptance/20261012T062435Z-81525fbf2e/payload.bin",
+  "bytes": 12582912,
+  "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+  "local_fsck": {
+    "xorbs_verified": 1,
+    "chunks_verified": 200,
+    "recipes_verified": 1
+  },
+  "remote_file_size": 12582912,
+  "direct_cas_readback": {
+    "passed": true,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a",
+    "client_checked_xet_file_hash": true
+  },
+  "official_hf_download_readback": {
+    "passed": true,
+    "sha256": "8b621a335a165e680ece424c26d64d80e7e9cc71bdcb4fd39ffc7af0d126037a"
+  }
+}

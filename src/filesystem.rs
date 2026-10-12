@@ -670,6 +670,14 @@ impl FileSystem {
             node.size,
         )
     }
+
+    /// Return the committed recipe only when no unflushed write stage shadows it.
+    pub(crate) fn committed_upload_content(&self, ino: u64) -> Result<Option<String>> {
+        if self.stages.contains_key(&ino) {
+            return Ok(None);
+        }
+        Ok(self.node(ino)?.content)
+    }
     pub fn read_handle(&self, fh: u64, offset: u64, size: usize) -> Result<Vec<u8>> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;
         if h.flags & libc::O_ACCMODE == libc::O_WRONLY {

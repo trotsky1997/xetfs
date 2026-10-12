@@ -21,7 +21,10 @@ from huggingface_hub import HfApi
 def run_text(command: list[str]) -> str:
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode:
-        raise RuntimeError(f"command failed with exit code {result.returncode}: {command[0]}")
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            f"command failed with exit code {result.returncode}: {command[0]}\n{detail[-4000:]}"
+        )
     return result.stdout
 
 
@@ -87,6 +90,7 @@ def main() -> None:
             ]
         )
         fsck = json.loads(run_text([str(binary), "--repo", str(local_repo), "fsck"]))
+        push_started = time.perf_counter()
         push = json.loads(
             run_text(
                 [
@@ -107,11 +111,13 @@ def main() -> None:
                 ]
             )
         )
+        native_push_seconds = time.perf_counter() - push_started
         commit_oid = push.get("commit_oid")
         if not commit_oid:
             raise RuntimeError("Hub upload returned no commit identifier")
 
         cas_readback = root / "cas-readback.bin"
+        cas_readback_started = time.perf_counter()
         with cas_readback.open("wb") as destination:
             subprocess.run(
                 [
@@ -130,11 +136,13 @@ def main() -> None:
                 check=True,
                 stdout=destination,
             )
+        cas_readback_seconds = time.perf_counter() - cas_readback_started
         cas_sha256 = sha256(cas_readback)
         if cas_readback.stat().st_size != size or cas_sha256 != expected_sha256:
             raise RuntimeError("direct CAS readback did not match the uploaded bytes")
 
         official_dir = root / "official-download"
+        official_download_started = time.perf_counter()
         run_text(
             [
                 "hf",
@@ -153,6 +161,7 @@ def main() -> None:
                 "--quiet",
             ]
         )
+        official_download_seconds = time.perf_counter() - official_download_started
         official_path = official_dir / file_path
         official_sha256 = sha256(official_path)
         if official_path.stat().st_size != size or official_sha256 != expected_sha256:
@@ -177,8 +186,9 @@ def main() -> None:
             "binary_sha256": sha256(binary),
             "repository": args.repo_id,
             "repository_private": before.private,
-            "upload_source_strategy": "re-readable XetFS snapshot stream from CAS or an open write stage",
+            "upload_source_strategy": "native Xet CAS transfer from committed XetFS Xorbs and a generated metadata shard",
             "xetfs_full_file_staging_bytes": 0,
+            "native_push_seconds": native_push_seconds,
             "initial_revision": before.sha,
             "commit_oid": commit_oid,
             "commit_url": push.get("commit_url"),
@@ -190,11 +200,13 @@ def main() -> None:
             "direct_cas_readback": {
                 "passed": True,
                 "sha256": cas_sha256,
+                "elapsed_seconds": cas_readback_seconds,
                 "client_checked_xet_file_hash": True,
             },
             "official_hf_download_readback": {
                 "passed": True,
                 "sha256": official_sha256,
+                "elapsed_seconds": official_download_seconds,
             },
         }
 

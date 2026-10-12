@@ -1,8 +1,10 @@
-//! Hugging Face Hub transfers backed by the official Xet client.
+//! Hugging Face Hub transfers.
 //!
-//! `hf-hub` delegates Xet files to Hugging Face's `hf-xet` Rust client. This
-//! keeps Hub token refresh, Xet shard registration, range downloads, retries,
-//! and the Hub Git/LFS commit format in the upstream implementation.
+//! Pulls and write-stage fallbacks use the official Hub/Xet Rust client.
+//! Committed Xet files use XetFS's native CAS and metadata-shard writer.
+
+#[path = "remote/push_native.rs"]
+mod push_native;
 
 use crate::{Error, FileSystem, Kind, Node, Result};
 use anyhow::{Context, bail};
@@ -315,10 +317,20 @@ fn collect_local_files(
     Ok(())
 }
 
-/// Upload regular files as one Hub commit. `hf-hub` selects Xet LFS transfer
-/// where the Hub classifies a file for Xet storage, then commits the matching
-/// Git LFS pointers to the requested revision.
+/// Upload regular files as one Hub commit. Committed Xet content is uploaded
+/// through the XetFS native CAS path; open write stages use the official client.
 pub fn push(
+    fs: &FileSystem,
+    repo_id: &str,
+    repo_type: &str,
+    revision: &str,
+    prefix: Option<&str>,
+    commit_message: &str,
+) -> anyhow::Result<PushReport> {
+    push_native::push(fs, repo_id, repo_type, revision, prefix, commit_message)
+}
+
+fn push_official(
     fs: &FileSystem,
     repo_id: &str,
     repo_type: &str,

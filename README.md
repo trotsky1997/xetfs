@@ -60,7 +60,7 @@ $XETFS_BIN --repo ./demo.repo mv /models/copy.txt /models/renamed.txt
 
 ## Hugging Face Hub 远程读写
 
-先用 Hugging Face CLI 登录，或按 `hf-hub` 的标准方式提供 `HF_TOKEN`。读取私有仓库需要 read 权限；上传需要 write 权限。`remote pull` 按指定 revision 下载 Xet 文件并导入本地 CAS，`remote push` 从本地不可变 CAS 配方或打开文件的暂存描述符创建可重读流，交给 Hugging Face Xet 客户端上传并写入一个 Hub commit，不再额外落盘复制完整文件：
+先用 Hugging Face CLI 登录，或按 `hf-hub` 的标准方式提供 `HF_TOKEN`。读取私有仓库需要 read 权限；上传需要 write 权限。`remote pull` 按指定 revision 下载 Xet 文件并导入本地 CAS。对于已提交文件，`remote push` 直接复用本地 Xorb 字节，XetFS 自行生成 Hub 的 Xet metadata shard、上传 CAS 对象并提交 Git LFS 文件指针；不会重新分块，也不会生成完整文件临时副本。仍有打开写句柄的内容会通过可重读流交给官方 Hugging Face Xet 客户端：
 
 ```sh
 hf auth login
@@ -81,7 +81,7 @@ pull 使用 Hub 批量快照接口并发获取文件；`--workers` 可设为 1 �
 
 `remote cat` 直接调用 Xet CAS reconstruction API 和签名 Xorb range URL，把指定字节范围写到 stdout，不需要先拉取整文件或初始化本地仓库。单次最多读取 64 MiB；目标必须是 Xet 存储的文件。完整文件读取会核对 Xet file hash。`--workers` 控制并发签名 Xorb 请求，范围为 1–64，默认 1；大文件可按网络与 CAS 响应情况调高。Hub 元数据仍由 `hf-hub` 获取，CAS token 按 Hugging Face CLI 的环境变量/本地 token 文件规则加载，短期 CAS token 和签名 URL 不落盘。
 
-Hub 客户端负责授权、Xet CAS 传输和 Hub commit 格式。Hub 判定为 Xet/LFS 的文件经 Xet shard/CAS 路径上传；其他小文件按 Hub 的常规 inline 路径处理。XetFS 使用本地 Xet 算法重新摄取下载字节，并从本地配方流式提供上传内容；本地 SQLite 仓库格式不会直接作为 Hub shard 上传。
+上传前，XetFS 通过 Hub preupload 接口选择 Xet/LFS 或 inline 模式；native 路径取得短期 Xet write token，验证本地 Xorb、chunk 范围、文件根哈希和 SHA-256 后上传 Xorb 与 metadata shard，最后通过 Hub commit API 写入文件指针。小型 inline 文件仍以 Hub 支持的 base64 文件操作提交；打开写句柄的文件和超出 inline 内存上限的常规文件由官方客户端流式处理。下载继续使用官方 Hub 客户端；本地 SQLite 格式不会上传到 Hub。
 
 ## 挂载
 

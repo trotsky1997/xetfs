@@ -20,11 +20,15 @@ flowchart LR
   H --> K[范围解码与块校验]
   I --> K
   K --> D
-  L[Hugging Face Hub] <--> M[remote.rs / hf-hub / hf-xet]
+  L[Hugging Face Hub] <--> M[remote.rs / hf-hub]
   M --> N[pull: 临时下载文件]
   N --> D
-  D --> Q[push: 可重读 Xorb/写暂存流]
-  Q --> M
+  D --> Q[已提交文件: 原生 Xet CAS 写入]
+  Q --> R[push_native.rs: Xorb + MDB shard]
+  R --> L
+  D --> S[打开写句柄: 可重读流]
+  S --> T[hf-hub / hf-xet fallback]
+  T --> L
   L --> O[remote_cas.rs / reconstruction + signed Xorb ranges]
   O --> P[远程范围字节]
 ```
@@ -38,8 +42,9 @@ flowchart LR
 | `xorb.rs` | v0 块头、三种压缩类型、解码大小限制 |
 | `repository.rs` | CAS 对象、块索引、不可变文件配方、事务、快照、GC、fsck |
 | `filesystem.rs` | 目录与 inode 语义、共享写暂存、句柄和 lookup 引用生命周期 |
-| `remote.rs` | Hub revision 枚举、通过官方 Xet 客户端下载/上传，以及远端 commit |
-| `remote_cas.rs` | Hub 文件元数据与读 token、v1/v2 CAS reconstruction、有界并发 signed multi-range Xorb 下载与范围重建 |
+| `remote.rs` | Hub revision 枚举、官方客户端拉取、写入 fallback 与本地/远端路径映射 |
+| `remote/push_native.rs` | 已提交文件的 Hub preupload、Xet write token、原始 Xorb CAS 上传、MDB shard 编码和 Hub LFS commit |
+| `remote_cas.rs` | Hub 文件元数据、读 token、v1/v2 CAS reconstruction、有界并发 signed multi-range Xorb 下载与范围重建，以及 Hub API URL/token 辅助 |
 | `fuse.rs` | Linux FUSE 回调、属性映射、稳定目录句柄与内核权限选项 |
 | `main.rs` | 管理、导入导出、范围读取、哈希、远程同步和挂载命令 |
 
@@ -51,9 +56,9 @@ CDC 使用 [Xet chunking](https://huggingface.co/docs/xet/en/chunking)的固定 
 
 Xorb 使用 [v0 块记录格式](https://huggingface.co/docs/xet/en/xorb)：版本 1 字节、压缩长度 3 字节、压缩类型 1 字节、原始长度 3 字节，长度均 little-endian。每块尝试 raw、LZ4 frame、BG4 + LZ4 并选择最小结果。序列化对象总长限制为 64 MiB。
 
-本地对象是无 footer 的块流。`inspect-xorb` 还接受官方固定样本实际包含的 `XETB` 末尾标记，且要求标记后立即 EOF；不把该观察扩展为对所有官方对象 footer 的支持。官方 shard 格式及服务端协议不在 0.1 的兼容范围内。
+本地对象是无 footer 的块流。`inspect-xorb` 还接受官方固定样本实际包含的 `XETB` 末尾标记，且要求标记后立即 EOF；不把该观察扩展为对所有官方对象 footer 的支持。native 写入保留本地块记录字节，并单独编码官方 MDB file/xorb metadata shard；chunk range 使用解压后的字节偏移，CAS Xorb 请求按对象 hash 幂等重试。生成的 shard 由固定版本的官方 Rust 结构解析器验证，并已在 Hugging Face Hub 完成上传与双客户端下载回读。
 
-`remote pull` 和 `remote push` 由官方 `hf-hub` Rust 客户端执行；它在 Hub 授权后调用官方 `hf-xet` 传输并提交 Hub 文件指针。`remote cat` 的 Xorb 数据面由 `remote_cas.rs` 独立实现：经 Hub metadata 取得 Xet file id，通过 Hub 的 xet-read-token API 获取短期 CAS token，查询 v2 reconstruction（404/501 回退 v1），按照签名 URL 给出的精确 HTTP Range 请求并行读取 Xorb 记录，再通过本地 Xorb 解码器按 term 次序重建。并发数可通过 `--workers` 设为 1–64，默认 1；响应体、重建描述和范围总量均有上限。完整文件读取以本地 Xet file hash 校验，部分范围以 reconstruction 长度、range 边界和解码记录长度校验。短期 token 和签名 URL 仅驻留内存。
+`remote pull` 由官方 `hf-hub` Rust 客户端读取 Hub revision。已提交文件的 `remote push` 使用 `remote/push_native.rs`：查询 Hub preupload 模式、取得短期 Xet write token、验证并原样上传不可变本地 Xorb，编码 MDB file/xorb sections 与 verification/SHA-256 metadata，注册 shard，再通过 Hub NDJSON commit 写入 LFS pointer。CAS 对象上传最多尝试四次，仅对网络连接/超时与 5xx/408/429 重试；服务端返回的错误体片段和请求 ID 用于定位失败。打开写句柄的文件与大于 inline 上限的非 Xet 文件保留官方 `hf-hub`/`hf-xet` 流式路径。小型 inline 文件通过 Hub 的 base64 commit 操作提交。`remote cat` 的 Xorb 数据面由 `remote_cas.rs` 独立实现：经 Hub metadata 取得 Xet file id，通过 Hub 的 xet-read-token API 获取短期 CAS token，查询 v2 reconstruction（404/501 回退 v1），按照签名 URL 给出的精确 HTTP Range 请求并行读取 Xorb 记录，再通过本地 Xorb 解码器按 term 次序重建。并发数可通过 `--workers` 设为 1–64，默认 1；响应体、重建描述和范围总量均有上限。完整文件读取以本地 Xet file hash 校验，部分范围以 reconstruction 长度、range 边界和解码记录长度校验。短期 token 和签名 URL 仅驻留内存。
 
 Hub 上传前仍由官方客户端完成分块、shard 注册和 Git LFS 指针提交；本地配方及 Xorb 文件不会直接作为 Hub shard 上传。两套仓库格式保持独立。
 
@@ -108,8 +113,8 @@ GC 的根包括当前 inode 和快照 inode。删除配方与块索引后，完�
 
 `fsck` 检查 SQLite 完整性、外键、物理 Xorb 内容与哈希、块索引、文件配方偏移及根哈希、inode 长度与主要 namespace/snapshot 约束。它检测问题并返回错误，不自动修复数据。
 
-`remote pull` 固定读取请求的 Hub revision，将匹配的目录树下载到临时目录，检查文件长度后逐项导入本地文件系统。`remote push` 为每个文件建立可重读快照流：已提交文件直接解码不可变 Xorb 记录，仍打开写句柄的文件从克隆的暂存文件描述符读取；之后由 `hf-hub`/`hf-xet` 执行授权、Xet CAS 上传与 Hub commit。该路径省去每个文件的第二份完整临时副本。push 是文件 upsert，不镜像删除；远程与本地的 revision 不额外记录在 SQLite 中。
+`remote pull` 固定读取请求的 Hub revision，将匹配的目录树下载到临时目录，检查文件长度后逐项导入本地文件系统。`remote push` 先建立稳定文件清单。对已提交 Xet 内容，native 路径从现有配方重建 shard，不重新扫描以生成 chunks、不复制整文件；它会顺序计算 Git LFS 所需 SHA-256。对正在写入的内容，官方客户端从可重读的暂存文件描述符读数据。push 是文件 upsert，不镜像删除；远程与本地的 revision 不额外记录在 SQLite 中。
 
 `remote cat` 用 Hub file metadata 找到目标文件哈希后，直接按字节范围请求 Xet CAS reconstruction 和签名 Xorb ranges；每次输出最多 64 MiB，适用于模型权重头部探测、索引读取和远程抽样。该命令输出原始字节，不修改本地 CAS。
 
-数据缓冲上界为一个至多 64 MiB 的编码对象及少量块；导入的配方和已见块集合占用 O(块数) 内存。当前随机写入的提交仍需扫描整个暂存文件，且 FUSE 使用直接 I/O 和串行回调。后续性能方向包括脏区附近 CDC 重同步、块缓存、批量小文件打包与并行编码；这些尚未实现。
+数据缓冲上界为一个至多 64 MiB 的编码对象及少量块；导入的配方和已见块集合占用 O(块数) 内存。当前随机写入的提交仍需扫描整个暂存文件，native push 顺序上传需要的新 Xorb，且 FUSE 使用直接 I/O 和串行回调。后续性能方向包括脏区附近 CDC 重同步、远端 CAS 已有对象探测、并行 Xorb 上传、块缓存、批量小文件打包与并行编码；这些尚未实现。

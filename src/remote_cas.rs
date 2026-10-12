@@ -114,7 +114,7 @@ fn is_truthy_environment_value(value: &str) -> bool {
     )
 }
 
-fn hub_token() -> Option<String> {
+pub(crate) fn hub_token() -> Option<String> {
     if env::var("HF_HUB_DISABLE_IMPLICIT_TOKEN")
         .is_ok_and(|value| is_truthy_environment_value(&value))
     {
@@ -164,6 +164,15 @@ fn hub_api_url(
     repo_type: &str,
     revision: &str,
 ) -> anyhow::Result<Url> {
+    hub_repo_api_url(endpoint, repo_id, repo_type, &["xet-read-token", revision])
+}
+
+pub(crate) fn hub_repo_api_url(
+    endpoint: &str,
+    repo_id: &str,
+    repo_type: &str,
+    route: &[&str],
+) -> anyhow::Result<Url> {
     let plural = match repo_type {
         "model" => "models",
         "dataset" => "datasets",
@@ -186,7 +195,7 @@ fn hub_api_url(
         segments.push(owner);
     }
     segments.extend(name.split('/'));
-    segments.extend(["xet-read-token", revision]);
+    segments.extend(route.iter().copied());
     append_segments(&mut url, &segments)?;
     Ok(url)
 }
