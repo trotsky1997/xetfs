@@ -4,12 +4,13 @@
 
 | 验证 | 环境 | 结果与证据 |
 | --- | --- | --- |
-| 格式、Clippy、Rust 测试、release 构建 | macOS 26 / Darwin 25.5，ARM64，Rust 1.98 | 27 项测试通过；[日志](native-checks.log) |
+| 格式、Clippy、Rust 测试、release 构建 | macOS 26 / Darwin 25.5，ARM64，Rust 1.98 | 本地 CAS/写暂存可重读上传流新增覆盖，完整测试 28 项通过；[当前提交的 GitHub CI](https://github.com/trotsky1997/xetfs/actions/runs/38209992125) |
 | Clippy、Rust 测试、release 构建 | Ubuntu 26.04.1，ARM64，Rust 1.98 | 25 项测试通过；[日志](linux-checks.log) |
 | 官方样本 | 63,527,244 字节 CSV、官方 Xorb、固定 dataset revision | 796 个分块边界和块哈希全部一致；文件/Xorb 哈希一致；重建字节一致；[JSON](official-reference.json) |
 | Hub 真实读取 | `xet-team/xet-spec-reference-files` 固定 revision；公开只读；macOS ARM64 | 经 Hugging Face Xet 客户端拉取 16 个文件、78,840,265 字节；导出的 CSV SHA-256 一致；fsck 验证 14 个 Xorb、1,041 个块、15 个配方；[JSON](remote-pull.json) |
 | 独立 CAS 远程读取 | 同一公开 revision；直接 Hub metadata + Xet read token + CAS reconstruction + 签名 Xorb Range；macOS ARM64 | 全文件 63,527,244 字节，客户端验证 Xet 文件哈希和 SHA-256；偏移 1 MiB 的 64 KiB 范围与全文件切片一致；[JSON](direct-cas-read.json)；复现脚本：[verify_direct_cas.py](../scripts/verify_direct_cas.py) |
 | Hub 远程写入与双路径回读 | 用户指定的 `di-zhang-fdu/xet-debug` 数据集；macOS ARM64 | 在公开数据集的唯一目录上传 12 MiB 合成 `.bin`，Hub commit `21ee4d72715d98f60eb97ebb9c88cf4104990088`；独立 CAS 和官方 `hf download` 回读 SHA-256 均为 `8b621a…126037a`；XetFS 本地 fsck 验证 200 块；[JSON](remote-write-acceptance.json)；复现脚本：[remote_write_acceptance.py](../scripts/remote_write_acceptance.py) |
+| 可重读流远程写入与双路径回读 | 同一用户指定的公开 dataset；macOS ARM64 | 从本地 CAS 直接流式上传 12 MiB 合成 `.bin`，没有 XetFS 全文件临时副本；CAS 与官方客户端下载的 SHA-256 均为 `8b621a…126037a`；[Hub commit](https://huggingface.co/datasets/di-zhang-fdu/xet-debug/commit/d493abdb11e7af44cb7e0ce0d3ab2b532b385500)；[JSON](remote-write-stream-acceptance.json) |
 | CAS 读取性能对照 | 同一 63,527,244 字节公开 Xet 文件；macOS ARM64；官方 `hf` CLI 1.32.0；隔离缓存、交错顺序 | 默认设置各 5 轮：XetFS 1 worker 中位数 4.01 秒，官方 CLI 8 workers 4.44 秒，约 1.11×；匹配配置补测：1/1 为 3.78/4.58 秒，8/8 为 4.02/4.28 秒。每次输出 SHA-256 一致；报告：[默认配置](direct-vs-official-defaults.json)、[8/8](direct-vs-official-cas.json)、[1/1](direct-vs-official-cas-workers-1.json)；脚本：[compare_cas_download.py](../scripts/compare_cas_download.py) |
 | Hub 并发拉取 | 同一 release 二进制、同一公开 revision、每组 3 次交错运行 | 1 worker 中位数 15.41 秒；8 workers 6.28 秒，减少 59.3%；三组均校验 CSV SHA-256 和 fsck；[JSON](remote-parallel-pull.json)；复现实验脚本：[remote_pull_benchmark.py](../scripts/remote_pull_benchmark.py) |
 | 真实 FUSE | Docker Linuxkit 7.0.12，ARM64，root | 读写、链接、目录枚举、元数据、重挂载和 SIGKILL 恢复通过；[JSON](mount-acceptance.json) |
