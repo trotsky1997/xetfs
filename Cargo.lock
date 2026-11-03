@@ -1329,6 +1329,7 @@ dependencies = [
  "memchr",
  "nix",
  "page_size",
+ "pkg-config",
  "smallvec",
  "zerocopy",
 ]
@@ -4453,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "xetfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",

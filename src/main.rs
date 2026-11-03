@@ -20,6 +20,16 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Export immutable compressed chunks, or verify and restore a transfer bundle.
+    Transfer {
+        #[command(subcommand)]
+        command: TransferCommand,
+    },
+    /// Native Hub CAS operations over this repository's chunks and recipes.
+    Cas {
+        #[command(subcommand)]
+        command: CasCommand,
+    },
     /// Create a repository in an empty directory.
     Init,
     /// Import a host file; atomically replace an existing regular file.
@@ -135,6 +145,41 @@ enum Command {
     S3 {
         #[command(subcommand)]
         command: S3Command,
+    },
+}
+#[derive(Subcommand)]
+enum TransferCommand {
+    Export {
+        path: PathBuf,
+        destination: PathBuf,
+    },
+    Restore {
+        manifest: PathBuf,
+        cache: PathBuf,
+        destination: PathBuf,
+        bundle: String,
+    },
+}
+#[derive(Subcommand)]
+enum CasCommand {
+    ImportXorb {
+        source: PathBuf,
+        hash: String,
+    },
+    ImportShard {
+        source: PathBuf,
+        allowed_xorbs: PathBuf,
+    },
+    Describe {
+        hash: String,
+    },
+    ExportXorb {
+        hash: String,
+        destination: PathBuf,
+    },
+    Dedupe {
+        hash: String,
+        destination: PathBuf,
     },
 }
 #[derive(Subcommand)]
@@ -339,6 +384,22 @@ fn remove(fs: &mut FileSystem, parent: u64, name: &OsStr, recursive: bool) -> Re
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Command::Transfer {
+            command:
+                TransferCommand::Restore {
+                    manifest,
+                    cache,
+                    destination,
+                    bundle,
+                },
+        } => {
+            return json(&xetfs::transfer::restore(
+                manifest,
+                cache,
+                destination,
+                bundle,
+            )?);
+        }
         Command::Hash { source, chunks } => {
             let mut records = Vec::new();
             for c in Chunker::new(File::open(source)?) {
@@ -374,7 +435,7 @@ fn main() -> Result<()> {
         }
         Command::Init => {
             let repo = Repository::init(&cli.repo)?;
-            return json(&serde_json::json!({"repository":repo.path(),"format_version":1}));
+            return json(&serde_json::json!({"repository":repo.path(),"format_version":4}));
         }
         Command::S3 {
             command:
@@ -480,6 +541,28 @@ fn main() -> Result<()> {
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     match cli.command {
+        Command::Transfer {
+            command: TransferCommand::Export { path, destination },
+        } => json(&xetfs::transfer::export(&fs, &path, &destination)?)?,
+        Command::Transfer { .. } => unreachable!(),
+        Command::Cas { command } => match command {
+            CasCommand::ImportXorb { source, hash } => {
+                json(&xetfs::cas::import_xorb(&mut fs, &source, &hash)?)?
+            }
+            CasCommand::ImportShard {
+                source,
+                allowed_xorbs,
+            } => json(&xetfs::cas::import_shard(&mut fs, &source, &allowed_xorbs)?)?,
+            CasCommand::Describe { hash } => json(&xetfs::cas::describe(fs.repository(), &hash)?)?,
+            CasCommand::ExportXorb { hash, destination } => json(&xetfs::cas::export_xorb(
+                fs.repository(),
+                &hash,
+                &destination,
+            )?)?,
+            CasCommand::Dedupe { hash, destination } => {
+                json(&xetfs::cas::dedupe(fs.repository(), &hash, &destination)?)?
+            }
+        },
         Command::Put { source, path } => json(&fs.put_file(path, File::open(source)?)?)?,
         Command::Get {
             path,
@@ -674,14 +757,12 @@ fn main() -> Result<()> {
             )?)?,
         },
         Command::Mount { mountpoint } => {
-            #[cfg(all(target_os = "linux", feature = "fuse"))]
+            #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
             xetfs::fuse::mount(fs, &mountpoint)?;
-            #[cfg(not(all(target_os = "linux", feature = "fuse")))]
+            #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "fuse")))]
             {
                 let _ = mountpoint;
-                anyhow::bail!(
-                    "FUSE mounting requires Linux and the fuse Cargo feature; repository commands work on macOS"
-                );
+                anyhow::bail!("FUSE mounting requires Linux or macOS and the fuse Cargo feature");
             }
         }
         Command::Init | Command::Hash { .. } | Command::InspectXorb { .. } | Command::S3 { .. } => {

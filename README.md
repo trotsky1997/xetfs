@@ -1,6 +1,6 @@
 # XetFS
 
-Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及 macOS/Linux 均可使用的仓库 CLI 与 Rust 库。当前版本为 **0.1.0**。
+Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及 macOS/Linux 均可使用的仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。macOS 的 macFUSE 适配正在开发，尚未完成真实挂载验证。
 
 实现依据是 [Hugging Face Xet 概览](https://huggingface.co/docs/hub/en/xet/index)、[开放协议](https://huggingface.co/docs/xet/index)及其 Rust 参考实现。分块、块哈希、Merkle 哈希和 Xorb 块编码已经用固定版本的官方数据核对。
 
@@ -14,22 +14,30 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 数据组织 | 不超过 64 MiB 的不可变 Xorb；文件保存块配方；`manifest` 展示合并后的 Xorb 范围 |
 | 文件操作 | 顺序与随机读写、追加、截断、零填充空洞、目录、重命名、硬链接、符号链接 |
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
+| 扩展属性 | 仓库 API 和实验性 macOS FSKit 支持，随快照保存与恢复 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
 | Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持按范围读取、Linux 只读按需远程挂载、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
+| XetLink 跨云传输 | 导出原始压缩块和文件配方，支持 HTTPS 中继、缺块批传、断点续传与节点本地校验恢复；两端主动连接 |
 | S3 兼容入口 | 经 SigV4 认证提供桶/对象 CRUD、ListObjectsV2、Range GET 和分段上传；对象写入 XetFS 并参与去重 |
 | S3 对象后端 | 可将不可变 Xorb 对象写穿到 S3，并在本地对象缓存缺失时回源；SQLite 元数据仍留在本地仓库 |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
+XetLink 的 `transfer export` / `transfer restore` 命令使用当前源码构建。
+
+XetLink 传输文件内容和权限位，时间、所有者与硬链接关系不包含在包中；源目录树含扩展属性时导出会拒绝执行。
+
 ## 构建与运行
 
-需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。仓库中的 ARM64 预编译二进制已从当前源码重建，包含下文的 Hub 远程命令。
+需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。
+
+当前仓库格式为 v4；旧版 v1、v2、v3 仓库需要对应旧版程序读取，当前版本不会自动迁移。
 
 ```sh
 cargo build --release --locked
 cargo test --locked --all-targets
 ```
 
-也可直接使用 `bin/xetfs-macos-arm64` 或 `bin/xetfs-linux-arm64`。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
+仓库中的 `bin/` 保存历史 macOS/Linux 构建。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
 
 以下示例创建独立仓库，导入本地文件并读取：
 
@@ -193,6 +201,8 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 - 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。
-- 当前使用直接 I/O 和串行 FUSE 回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。
+- Linux FUSE 使用直接 I/O 和串行回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。
 
 结构、提交顺序和格式约束见 [ARCHITECTURE.md](ARCHITECTURE.md)。代码采用 Apache-2.0；算法依据与测试数据来源见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+macOS 开发状态：Rust FUSE 后端可链接 macFUSE 5，并支持仓库扩展属性。`fuser` 0.16 使用设备文件描述符，macFUSE 的 FSKit 后端使用 MFMount 消息通道；当前版本尚未接通该通道，独立目录挂载尚未成功。

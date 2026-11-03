@@ -1,10 +1,13 @@
 [package]
 name = "xetfs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A local content-addressed, deduplicating filesystem using Xet algorithms"
 license = "Apache-2.0"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [features]
 default = ["fuse"]
@@ -37,13 +40,16 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
-[dev-dependencies]
 xet-core-structures = "=1.7.0"
+
+[dev-dependencies]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.16", optional = true, default-features = false, features = ["abi-7-31"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { version = "0.16", optional = true, default-features = false, features = ["libfuse", "abi-7-31"] }
+
 [profile.release]
 lto = "thin"
 strip = true
-

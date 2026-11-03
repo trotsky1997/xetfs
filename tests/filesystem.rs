@@ -428,10 +428,25 @@ fn ownership_modes_and_explicit_timestamps_survive_restore() {
         SetAttr {
             atime_ns: Some(-100),
             mtime_ns: Some(123456),
+            birthtime_ns: Some(-987654321),
+            flags: Some(0x8000),
             ..Default::default()
         },
     )
     .unwrap();
+    assert!(
+        fs.setattr(
+            n.ino,
+            SetAttr {
+                mode: Some(0),
+                flags: Some(2),
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(fs.node(n.ino).unwrap().mode, 0o6755);
+    assert_eq!(fs.copy_file("/a", "/copy").unwrap().flags, 0x8000);
     fs.snapshot("before").unwrap();
     let h = fs.open_handle(n.ino, libc::O_WRONLY).unwrap();
     fs.write_handle(h, 0, b"x").unwrap();
@@ -440,10 +455,11 @@ fn ownership_modes_and_explicit_timestamps_survive_restore() {
     fs.restore("before").unwrap();
     let n = fs.node(n.ino).unwrap();
     assert_eq!(
-        (n.mode, n.uid, n.gid, n.atime_ns, n.mtime_ns),
-        (0o6755, 12, 34, -100, 123456)
+        (n.mode, n.uid, n.gid, n.atime_ns, n.mtime_ns, n.birthtime_ns),
+        (0o6755, 12, 34, -100, 123456, -987654321)
     );
     assert_eq!(n.kind, Kind::File);
+    assert_eq!(n.flags, 0x8000);
 }
 
 #[test]
@@ -468,4 +484,111 @@ fn reconstruction_terms_cover_the_file_and_remain_valid_after_compaction() {
         fs.read_inode(n.ino, 1000000, 77).unwrap(),
         data[1000000..1000077]
     );
+}
+
+#[test]
+fn xattrs_follow_hardlinks_copies_and_snapshots() {
+    use xetfs::XattrPolicy;
+    let (dir, mut fs) = setup();
+    let n = fs.put_file("/file", b"content".as_slice()).unwrap();
+    fs.set_xattr(
+        n.ino,
+        b"com.apple.test",
+        Some(b"original"),
+        XattrPolicy::Create,
+    )
+    .unwrap();
+    is_errno(
+        fs.set_xattr(n.ino, b"com.apple.test", Some(b"x"), XattrPolicy::Create),
+        libc::EEXIST,
+    );
+    fs.link(n.ino, 1, OsStr::new("hard")).unwrap();
+    let copy = fs.copy_file("/file", "/copy").unwrap();
+    assert_eq!(
+        fs.get_xattr(copy.ino, b"com.apple.test").unwrap(),
+        b"original"
+    );
+    let bundle = dir.path().join("bundle");
+    assert!(xetfs::transfer::export(&fs, std::path::Path::new("/"), &bundle).is_err());
+    assert!(!bundle.exists());
+    fs.snapshot("before").unwrap();
+    fs.set_xattr(
+        n.ino,
+        b"com.apple.test",
+        Some(b"changed"),
+        XattrPolicy::Replace,
+    )
+    .unwrap();
+    assert_eq!(
+        fs.get_xattr(fs.resolve("/hard").unwrap().ino, b"com.apple.test")
+            .unwrap(),
+        b"changed"
+    );
+    assert_eq!(
+        fs.get_xattr(copy.ino, b"com.apple.test").unwrap(),
+        b"original"
+    );
+    fs.restore("before").unwrap();
+    assert_eq!(fs.get_xattr(n.ino, b"com.apple.test").unwrap(), b"original");
+    fs.set_xattr(n.ino, b"com.apple.test", None, XattrPolicy::Remove)
+        .unwrap();
+    assert!(fs.list_xattrs(n.ino).unwrap().is_empty());
+    fs.restore("before").unwrap();
+    fs.drop_snapshot("before").unwrap();
+    fs.repository().fsck().unwrap();
+    drop(fs);
+    let fs = FileSystem::new(Repository::open(dir.path().join("repo")).unwrap());
+    assert_eq!(fs.get_xattr(n.ino, b"com.apple.test").unwrap(), b"original");
+}
+
+#[test]
+fn old_repository_format_is_rejected_without_deleting_data() {
+    let (dir, mut fs) = setup();
+    let n = fs.put_file("/keep", b"keep".as_slice()).unwrap();
+    drop(fs);
+    let path = dir.path().join("repo");
+    let db = rusqlite::Connection::open(path.join("metadata.sqlite")).unwrap();
+    db.pragma_update(None, "user_version", 1).unwrap();
+    drop(db);
+    assert!(matches!(Repository::open(&path), Err(Error::Invalid(_))));
+    let db = rusqlite::Connection::open(path.join("metadata.sqlite")).unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM inodes WHERE ino=?1", [n.ino], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+    db.pragma_update(None, "user_version", 2).unwrap();
+    drop(db);
+    assert!(matches!(Repository::open(&path), Err(Error::Invalid(_))));
+    let db = rusqlite::Connection::open(path.join("metadata.sqlite")).unwrap();
+    db.pragma_update(None, "user_version", 3).unwrap();
+    drop(db);
+    assert!(matches!(Repository::open(&path), Err(Error::Invalid(_))));
+}
+
+#[test]
+fn repository_identifier_survives_a_directory_move() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let moved = dir.path().join("moved");
+    drop(Repository::init(&first).unwrap());
+    let id = Repository::identifier(&first).unwrap();
+    std::fs::rename(&first, &moved).unwrap();
+    assert_eq!(Repository::identifier(&moved).unwrap(), id);
+    let other = dir.path().join("other");
+    drop(Repository::init(&other).unwrap());
+    assert_ne!(Repository::identifier(&other).unwrap(), id);
+}
+
+#[test]
+fn import_publication_keeps_exclusive_lock_until_owner_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("repo");
+    let repo = Repository::init_import(&path).unwrap();
+    assert!(Repository::open(&path).is_err());
+    repo.finish_import().unwrap();
+    assert!(matches!(Repository::open(&path), Err(Error::Busy)));
+    drop(repo);
+    assert!(Repository::open(&path).is_ok());
 }

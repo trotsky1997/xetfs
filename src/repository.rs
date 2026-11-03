@@ -49,6 +49,8 @@ pub struct Node {
     pub atime_ns: i64,
     pub mtime_ns: i64,
     pub ctime_ns: i64,
+    pub birthtime_ns: i64,
+    pub flags: u32,
     pub content: Option<String>,
     pub target: Option<Vec<u8>>,
     pub nlink: u32,
@@ -65,9 +67,11 @@ impl Node {
             atime_ns: r.get(6)?,
             mtime_ns: r.get(7)?,
             ctime_ns: r.get(8)?,
-            content: r.get(9)?,
-            target: r.get(10)?,
-            nlink: r.get(11)?,
+            birthtime_ns: r.get(9)?,
+            flags: r.get(10)?,
+            content: r.get(11)?,
+            target: r.get(12)?,
+            nlink: r.get(13)?,
         })
     }
 }
@@ -341,12 +345,25 @@ fn read_chunk(
 }
 impl Repository {
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::init_inner(path.as_ref(), false)
+    }
+    pub fn init_import(path: impl AsRef<Path>) -> Result<Self> {
+        Self::init_inner(path.as_ref(), true)
+    }
+    fn init_inner(path: &Path, importing: bool) -> Result<Self> {
         if path.exists() && fs::read_dir(path)?.next().is_some() {
             return Err(Error::Invalid("repository directory must be empty".into()));
         }
         fs::create_dir_all(path)?;
         let root = fs::canonicalize(path)?;
+        if importing {
+            let marker = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("IMPORT_INCOMPLETE"))?;
+            marker.sync_all()?;
+            sync_dir(&root)?;
+        }
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -361,7 +378,7 @@ impl Repository {
         let tx = conn.transaction()?;
         tx.execute_batch(include_str!("schema.sql"))?;
         let now = now_ns();
-        tx.execute("INSERT INTO inodes(ino,kind,mode,uid,gid,size,atime,mtime,ctime) VALUES(1,2,?1,?2,?3,0,?4,?4,?4)", params![0o755,unsafe {libc::getuid()},unsafe {libc::getgid()},now])?;
+        tx.execute("INSERT INTO inodes(ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime) VALUES(1,2,?1,?2,?3,0,?4,?4,?4,?4)", params![0o755,unsafe {libc::getuid()},unsafe {libc::getgid()},now])?;
         tx.commit()?;
         sync_dir(&root)?;
         Ok(Self {
@@ -372,7 +389,25 @@ impl Repository {
         })
     }
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(path.as_ref(), false)
+    }
+    pub fn open_import(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(path.as_ref(), true)
+    }
+    fn open_inner(path: &Path, importing: bool) -> Result<Self> {
         let root = fs::canonicalize(path)?;
+        let marker = root.join("IMPORT_INCOMPLETE");
+        let incomplete = marker.exists();
+        if (importing && !marker.is_file()) || (!importing && incomplete) {
+            return Err(Error::Invalid(
+                if incomplete {
+                    "repository import is incomplete"
+                } else {
+                    "repository has no incomplete import"
+                }
+                .into(),
+            ));
+        }
         if !root.join("metadata.sqlite").is_file() {
             return Err(Error::Invalid("not a XetFS repository".into()));
         }
@@ -386,10 +421,17 @@ impl Repository {
         let conn = Connection::open(root.join("metadata.sqlite"))?;
         Self::configure(&conn)?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version != 1 {
+        if version != 4 {
             return Err(Error::Invalid(format!(
                 "unsupported repository version: {version}"
             )));
+        }
+        let id: Vec<u8> =
+            conn.query_row("SELECT uuid FROM repository_info WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+        if id.len() != 16 {
+            return Err(Error::Corrupt("invalid repository identifier".into()));
         }
         conn.execute("DELETE FROM inodes WHERE ino<>1 AND NOT EXISTS(SELECT 1 FROM entries WHERE entries.ino=inodes.ino)",[])?;
         for entry in fs::read_dir(root.join("tmp"))? {
@@ -408,6 +450,34 @@ impl Repository {
             _lock: lock,
         })
     }
+    /// Publish a verified import while retaining the exclusive repository lock.
+    pub fn finish_import(&self) -> Result<()> {
+        let marker = self.root.join("IMPORT_INCOMPLETE");
+        if !marker.is_file() {
+            return Err(Error::Invalid("repository has no incomplete import".into()));
+        }
+        fs::remove_file(marker)?;
+        sync_dir(&self.root)?;
+        Ok(())
+    }
+    /// Clear an incomplete import's namespace while retaining durable chunks for retry.
+    pub fn reset_import(&mut self) -> Result<()> {
+        if !self.root.join("IMPORT_INCOMPLETE").is_file() {
+            return Err(Error::Invalid("repository has no incomplete import".into()));
+        }
+        let tx = self.conn.transaction()?;
+        let snapshots: u64 = tx.query_row("SELECT COUNT(*) FROM snapshots", [], |r| r.get(0))?;
+        if snapshots != 0 {
+            return Err(Error::Invalid(
+                "incomplete repository contains snapshots".into(),
+            ));
+        }
+        tx.execute("DELETE FROM entries", [])?;
+        tx.execute("DELETE FROM inodes WHERE ino<>1", [])?;
+        tx.execute("DELETE FROM inode_xattrs WHERE ino=1", [])?;
+        tx.commit()?;
+        Ok(())
+    }
     fn configure(conn: &Connection) -> Result<()> {
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
@@ -417,6 +487,26 @@ impl Repository {
     }
     pub fn path(&self) -> &Path {
         &self.root
+    }
+    pub fn identifier(path: impl AsRef<Path>) -> Result<[u8; 16]> {
+        if path.as_ref().join("IMPORT_INCOMPLETE").exists() {
+            return Err(Error::Invalid("repository import is incomplete".into()));
+        }
+        let db = path.as_ref().join("metadata.sqlite");
+        let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != 4 {
+            return Err(Error::Invalid(format!(
+                "unsupported repository version: {version}"
+            )));
+        }
+        let bytes: Vec<u8> =
+            conn.query_row("SELECT uuid FROM repository_info WHERE id=1", [], |r| {
+                r.get(0)
+            })?;
+        bytes
+            .try_into()
+            .map_err(|_| Error::Corrupt("invalid repository identifier".into()))
     }
     /// Configure S3 as the durable Xorb object store and upload all existing objects first.
     pub fn configure_s3_backend(&mut self, config: &S3BackendConfig) -> Result<()> {
@@ -440,6 +530,38 @@ impl Repository {
         }
         write_config(&self.root, config)?;
         self.object_store = Some(store);
+        Ok(())
+    }
+    /// Preload a bounded batch of small files into shared durable Xorbs.
+    pub fn preload_small_files(&mut self, files: &[Vec<u8>]) -> Result<()> {
+        if files.len() > 512 || files.iter().map(Vec::len).sum::<usize>() > 8 * 1024 * 1024 {
+            return Err(Error::Invalid("preload batch exceeds limit".into()));
+        }
+        let tx = self.conn.transaction()?;
+        let mut pack = Pack::default();
+        let mut seen = HashSet::new();
+        for file in files {
+            for data in Chunker::new(file.as_slice()) {
+                let data = data?;
+                let h = hash::chunk_hash(&data);
+                let hex = hash::to_hex(&h);
+                if !seen.insert(hex.clone())
+                    || tx
+                        .query_row("SELECT 1 FROM chunks WHERE hash=?1", [&hex], |_| Ok(()))
+                        .optional()?
+                        .is_some()
+                {
+                    continue;
+                }
+                let record = xorb::encode(&data)?;
+                if pack.bytes.len() + record.len() > xorb::MAX_XORB {
+                    save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
+                }
+                pack.add(h, data.len() as u64, record);
+            }
+        }
+        save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
+        tx.commit()?;
         Ok(())
     }
     /// Objects become durable before the transaction publishes their index.
@@ -799,6 +921,7 @@ impl Repository {
             "INSERT INTO snapshot_entries SELECT ?1,* FROM entries",
             [name],
         )?;
+        tx.execute("INSERT INTO snapshot_xattrs SELECT ?1,x.ino,x.name,x.value FROM inode_xattrs x JOIN snapshot_nodes n ON n.snapshot=?1 AND n.ino=x.ino", [name])?;
         tx.commit()?;
         Ok(())
     }
@@ -824,9 +947,13 @@ impl Repository {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM entries", [])?;
         tx.execute("DELETE FROM inodes", [])?;
-        tx.execute("INSERT INTO inodes SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,content,target FROM snapshot_nodes WHERE snapshot=?1",[name])?;
+        tx.execute("INSERT INTO inodes SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,flags,content,target FROM snapshot_nodes WHERE snapshot=?1",[name])?;
         tx.execute(
             "INSERT INTO entries SELECT parent,name,ino FROM snapshot_entries WHERE snapshot=?1",
+            [name],
+        )?;
+        tx.execute(
+            "INSERT INTO inode_xattrs SELECT ino,name,value FROM snapshot_xattrs WHERE snapshot=?1",
             [name],
         )?;
         tx.commit()?;
@@ -1018,6 +1145,7 @@ impl Repository {
             return Err(Error::Corrupt("inode content or size mismatch".into()));
         }
         for sql in [
+            "SELECT CASE WHEN COUNT(*)=1 AND MIN(id)=1 AND MIN(length(uuid))=16 THEN 0 ELSE 1 END FROM repository_info",
             "SELECT COUNT(*) FROM chunks c JOIN xorb_chunks p ON c.xorb=p.xorb AND c.idx=p.idx WHERE c.hash<>p.hash",
             "SELECT COUNT(*) FROM inodes WHERE ino=1 AND kind<>2",
             "SELECT COUNT(*) FROM entries e JOIN inodes p ON p.ino=e.parent WHERE p.kind<>2 OR e.ino=1 OR length(e.name)=0 OR length(e.name)>255 OR instr(e.name,x'2f')>0 OR instr(e.name,x'00')>0 OR e.name IN (x'2e',x'2e2e')",
@@ -1077,5 +1205,124 @@ mod tests {
         assert!(xorb.chunks[1].offset > 0);
         assert!(xorb.chunks[1].offset > xorb.chunks[0].offset);
         assert!((xorb.bytes.len() as u64) < xorb.raw_bytes);
+    }
+}
+
+impl Repository {
+    pub(crate) fn import_cas_chunks(
+        &mut self,
+        records: Vec<Vec<u8>>,
+        expected: &str,
+    ) -> Result<(String, u64)> {
+        let hashes: Vec<_> = records
+            .iter()
+            .map(|d| (hash::chunk_hash(d), d.len() as u64))
+            .collect();
+        if hash::to_hex(&hash::xorb_hash(&hashes)) != expected {
+            return Err(Error::Invalid("Xorb hash mismatch".into()));
+        }
+        let tx = self.conn.transaction()?;
+        let mut pack = Pack::default();
+        for (data, (h, len)) in records.iter().zip(&hashes) {
+            pack.add(*h, *len, xorb::encode(data)?);
+        }
+        if pack.bytes.len() > xorb::MAX_XORB {
+            return Err(Error::Invalid("Xorb exceeds 64 MiB".into()));
+        }
+        save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
+        tx.commit()?;
+        self.register_cas_recipe(&hashes)
+    }
+
+    /// Publish a DMA-written native Xorb without rewriting its encoded bytes.
+    pub(crate) fn import_direct_xorb(&mut self, source: &Path, expected: &str) -> Result<String> {
+        let expected_hash = hash::from_hex(expected)?;
+        if self.object_store.is_some() {
+            return Err(Error::Invalid(
+                "direct Xorb publication requires local storage".into(),
+            ));
+        }
+        let meta = fs::symlink_metadata(source)?;
+        if !meta.is_file()
+            || meta.len() == 0
+            || meta.len() > xorb::MAX_XORB as u64
+            || source.parent().map(fs::canonicalize).transpose()?
+                != Some(fs::canonicalize(self.root.join("tmp"))?)
+        {
+            return Err(Error::Invalid(
+                "direct Xorb must be a bounded ordinary file in repository tmp".into(),
+            ));
+        }
+        let mut file = File::open(source)?;
+        let mut chunks = Vec::new();
+        let mut raw_size = 0u64;
+        while file.stream_position()? < meta.len() {
+            let offset = file.stream_position()?;
+            let (data, stored) = xorb::decode(&mut file)?
+                .ok_or_else(|| Error::Corrupt("truncated direct Xorb".into()))?;
+            raw_size += data.len() as u64;
+            if raw_size > xorb::MAX_XORB as u64 || chunks.len() >= 8192 {
+                return Err(Error::Invalid(
+                    "direct Xorb expands beyond its bounds".into(),
+                ));
+            }
+            chunks.push((hash::chunk_hash(&data), data.len() as u64, offset, stored));
+        }
+        let hashes: Vec<_> = chunks.iter().map(|&(h, n, _, _)| (h, n)).collect();
+        if chunks.is_empty()
+            || file.stream_position()? != meta.len()
+            || hash::xorb_hash(&hashes) != expected_hash
+        {
+            return Err(Error::Corrupt("direct Xorb hash mismatch".into()));
+        }
+        file.sync_all()?;
+        let destination = self.root.join("objects").join(format!("{expected}.xorb"));
+        match fs::hard_link(source, &destination) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Match ordinary CAS publication: never overwrite a different encoding.
+                if fs::read(&destination)? != fs::read(source)? {
+                    return Err(Error::Corrupt("existing direct Xorb differs".into()));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+        sync_dir(&self.root.join("objects"))?;
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO xorbs VALUES (?1,?2)",
+            params![expected, meta.len()],
+        )?;
+        for (i, &(h, n, offset, stored)) in chunks.iter().enumerate() {
+            let h = hash::to_hex(&h);
+            tx.execute(
+                "INSERT OR IGNORE INTO xorb_chunks VALUES (?1,?2,?3,?4,?5,?6)",
+                params![expected, i as u64, h, n, offset, stored],
+            )?;
+            tx.execute("INSERT INTO chunks VALUES (?1,?2,?3) ON CONFLICT(hash) DO UPDATE SET xorb=excluded.xorb,idx=excluded.idx", params![h, expected, i as u64])?;
+        }
+        tx.commit()?;
+        Ok(self.register_cas_recipe(&hashes)?.0)
+    }
+    pub(crate) fn register_cas_recipe(&mut self, recipe: &[(Hash, u64)]) -> Result<(String, u64)> {
+        let id = hash::to_hex(&hash::file_hash(recipe));
+        let size: u64 = recipe.iter().map(|(_, n)| n).sum();
+        let tx = self.conn.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO contents VALUES (?1,?2)",
+            params![id, size],
+        )?;
+        if inserted != 0 {
+            let mut offset = 0u64;
+            for (i, (h, n)) in recipe.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO file_chunks VALUES (?1,?2,?3,?4,?5)",
+                    params![id, i as u64, offset, n, hash::to_hex(h)],
+                )?;
+                offset += n;
+            }
+        }
+        tx.commit()?;
+        Ok((id, size))
     }
 }

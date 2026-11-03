@@ -22,6 +22,30 @@ pub struct SetAttr {
     pub size: Option<u64>,
     pub atime_ns: Option<i64>,
     pub mtime_ns: Option<i64>,
+    pub birthtime_ns: Option<i64>,
+    pub flags: Option<u32>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XattrPolicy {
+    Set,
+    Create,
+    Replace,
+    Remove,
+}
+
+#[cfg(target_os = "macos")]
+const NO_XATTR: i32 = libc::ENOATTR;
+#[cfg(not(target_os = "macos"))]
+const NO_XATTR: i32 = libc::ENODATA;
+
+fn xattr_name(name: &[u8]) -> Result<()> {
+    if name.is_empty() || name.contains(&0) {
+        return errno(libc::EINVAL);
+    }
+    if name.len() > 127 {
+        return errno(libc::ENAMETOOLONG);
+    }
+    Ok(())
 }
 struct Handle {
     ino: u64,
@@ -51,8 +75,108 @@ impl FileSystem {
             next_handle: 1,
         }
     }
+    pub fn preload_small_files(&mut self, files: &[Vec<u8>]) -> Result<()> {
+        self.repo.preload_small_files(files)
+    }
     pub fn repository(&self) -> &Repository {
         &self.repo
+    }
+    pub fn get_xattr(&self, ino: u64, name: &[u8]) -> Result<Vec<u8>> {
+        xattr_name(name)?;
+        self.node(ino)?;
+        self.repo
+            .conn
+            .query_row(
+                "SELECT value FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(Error::Errno(NO_XATTR))
+    }
+    pub fn list_xattrs(&self, ino: u64) -> Result<Vec<Vec<u8>>> {
+        self.node(ino)?;
+        Ok(self
+            .repo
+            .conn
+            .prepare("SELECT name FROM inode_xattrs WHERE ino=?1 ORDER BY name")?
+            .query_map([ino], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn set_xattr(
+        &mut self,
+        ino: u64,
+        name: &[u8],
+        value: Option<&[u8]>,
+        policy: XattrPolicy,
+    ) -> Result<()> {
+        xattr_name(name)?;
+        if (policy == XattrPolicy::Remove) != value.is_none() {
+            return errno(libc::EINVAL);
+        }
+        self.node(ino)?;
+        let tx = self.repo.conn.transaction()?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists && policy == XattrPolicy::Create {
+            return errno(libc::EEXIST);
+        }
+        if !exists && matches!(policy, XattrPolicy::Replace | XattrPolicy::Remove) {
+            return errno(NO_XATTR);
+        }
+        if let Some(value) = value {
+            tx.execute("INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3) ON CONFLICT(ino,name) DO UPDATE SET value=excluded.value", params![ino, name, value])?;
+        } else {
+            tx.execute(
+                "DELETE FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+            )?;
+        }
+        tx.execute(
+            "UPDATE inodes SET ctime=?1 WHERE ino=?2",
+            params![now_ns(), ino],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Pin an already verified recipe without reading or rechunking its bytes.
+    pub fn pin_content(&mut self, path: impl AsRef<Path>, id: &str) -> Result<Node> {
+        let size: u64 =
+            self.repo
+                .conn
+                .query_row("SELECT size FROM contents WHERE id=?1", [id], |r| r.get(0))?;
+        if let Ok(existing) = self.resolve_nofollow(&path) {
+            if existing.kind != Kind::File || existing.content.as_deref() != Some(id) {
+                return Err(Error::Invalid(
+                    "immutable CAS path already has different content".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let (parent, name) = self.path_parent(path)?;
+        self.create_node(
+            parent,
+            &name,
+            Kind::File,
+            0o400,
+            unsafe { libc::getuid() },
+            unsafe { libc::getgid() },
+            Some(id),
+            size,
+            None,
+            None,
+            None,
+            0,
+        )
+    }
+    pub(crate) fn cas_repository_mut(&mut self) -> &mut Repository {
+        &mut self.repo
     }
     pub fn retain_inode(&mut self, ino: u64, count: u64) {
         *self.pins.entry(ino).or_default() += count;
@@ -164,7 +288,7 @@ impl FileSystem {
     fn view_node(&self, ino: u64, snapshot: Option<&str>) -> Result<Node> {
         match snapshot {
             None => self.node(ino),
-            Some(s) => Ok(self.repo.conn.query_row("SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,content,target,1 FROM snapshot_nodes WHERE snapshot=?1 AND ino=?2",params![s,ino],Node::row).optional()?.ok_or(Error::Errno(libc::ENOENT))?),
+            Some(s) => Ok(self.repo.conn.query_row("SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,flags,content,target,1 FROM snapshot_nodes WHERE snapshot=?1 AND ino=?2",params![s,ino],Node::row).optional()?.ok_or(Error::Errno(libc::ENOENT))?),
         }
     }
     fn resolve_bytes(
@@ -263,6 +387,9 @@ impl FileSystem {
         content: Option<&str>,
         size: u64,
         target: Option<&[u8]>,
+        copy_xattrs: Option<u64>,
+        birthtime: Option<i64>,
+        flags: u32,
     ) -> Result<Node> {
         let dir = self.directory(parent)?;
         Self::name(name)?;
@@ -278,12 +405,18 @@ impl FileSystem {
             };
         let tx = self.repo.conn.transaction()?;
         let now = now_ns();
-        tx.execute("INSERT INTO inodes(kind,mode,uid,gid,size,atime,mtime,ctime,content,target) VALUES (?1,?2,?3,?4,?5,?6,?6,?6,?7,?8)",params![kind as i64,mode,uid,gid,size,now,content,target])?;
+        tx.execute("INSERT INTO inodes(kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,content,target,flags) VALUES (?1,?2,?3,?4,?5,?6,?6,?6,?7,?8,?9,?10)",params![kind as i64,mode,uid,gid,size,now,birthtime.unwrap_or(now),content,target,flags])?;
         let ino = tx.last_insert_rowid() as u64;
         tx.execute(
             "INSERT INTO entries VALUES (?1,?2,?3)",
             params![parent, name, ino],
         )?;
+        if let Some(source) = copy_xattrs {
+            tx.execute(
+                "INSERT INTO inode_xattrs SELECT ?1,name,value FROM inode_xattrs WHERE ino=?2",
+                params![ino, source],
+            )?;
+        }
         tx.execute(
             "UPDATE inodes SET mtime=?1,ctime=?1 WHERE ino=?2",
             params![now, parent],
@@ -310,6 +443,9 @@ impl FileSystem {
             Some(&empty),
             0,
             None,
+            None,
+            None,
+            0,
         )
     }
     pub fn mkdir(
@@ -330,6 +466,59 @@ impl FileSystem {
             None,
             0,
             None,
+            None,
+            None,
+            0,
+        )
+    }
+    pub fn create_with_birthtime(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        kind: Kind,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        target: Option<&[u8]>,
+        birthtime: Option<i64>,
+        flags: u32,
+    ) -> Result<Node> {
+        if flags & !0x8000 != 0 {
+            return errno(libc::EOPNOTSUPP);
+        }
+        let empty = if kind == Kind::File {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        } else {
+            None
+        };
+        let size = if kind == Kind::Symlink {
+            let target = target.ok_or(Error::Errno(libc::EINVAL))?;
+            if target.is_empty() || target.contains(&0) {
+                return errno(libc::EINVAL);
+            }
+            if target.len() > 4096 {
+                return errno(libc::ENAMETOOLONG);
+            }
+            target.len() as u64
+        } else {
+            if target.is_some() {
+                return errno(libc::EINVAL);
+            }
+            0
+        };
+        self.create_node(
+            parent,
+            name.as_bytes(),
+            kind,
+            mode,
+            uid,
+            gid,
+            empty.as_deref(),
+            size,
+            target,
+            None,
+            birthtime,
+            flags,
         )
     }
     pub fn mkdir_all(&mut self, path: impl AsRef<Path>) -> Result<Node> {
@@ -382,6 +571,9 @@ impl FileSystem {
             None,
             target.len() as u64,
             Some(target),
+            None,
+            None,
+            0,
         )
     }
     pub fn link(&mut self, ino: u64, parent: u64, name: &OsStr) -> Result<Node> {
@@ -552,6 +744,9 @@ impl FileSystem {
                 Some(&id),
                 size,
                 None,
+                None,
+                None,
+                0,
             )
         }
     }
@@ -573,6 +768,9 @@ impl FileSystem {
             node.content.as_deref(),
             node.size,
             None,
+            Some(node.ino),
+            None,
+            node.flags,
         )
     }
     fn ensure_stage(&mut self, ino: u64) -> Result<&mut Stage> {
@@ -764,6 +962,9 @@ impl FileSystem {
         Ok(())
     }
     pub fn setattr(&mut self, ino: u64, attrs: SetAttr) -> Result<Node> {
+        if attrs.flags.is_some_and(|flags| flags & !0x8000 != 0) {
+            return errno(libc::EOPNOTSUPP);
+        }
         let node = self.node(ino)?;
         if let Some(size) = attrs.size {
             if node.kind != Kind::File {
@@ -790,7 +991,7 @@ impl FileSystem {
         {
             stage.mtime = mtime;
         }
-        self.repo.conn.execute("UPDATE inodes SET mode=COALESCE(?1,mode),uid=COALESCE(?2,uid),gid=COALESCE(?3,gid),atime=COALESCE(?4,atime),mtime=COALESCE(?5,mtime),ctime=?6 WHERE ino=?7",params![attrs.mode.map(|m| m&0o7777),attrs.uid,attrs.gid,attrs.atime_ns,attrs.mtime_ns,now_ns(),ino])?;
+        self.repo.conn.execute("UPDATE inodes SET mode=COALESCE(?1,mode),uid=COALESCE(?2,uid),gid=COALESCE(?3,gid),atime=COALESCE(?4,atime),mtime=COALESCE(?5,mtime),birthtime=COALESCE(?6,birthtime),flags=COALESCE(?7,flags),ctime=?8 WHERE ino=?9",params![attrs.mode.map(|m| m&0o7777),attrs.uid,attrs.gid,attrs.atime_ns,attrs.mtime_ns,attrs.birthtime_ns,attrs.flags,now_ns(),ino])?;
         self.node(ino)
     }
     pub fn snapshot(&mut self, name: &str) -> Result<()> {
