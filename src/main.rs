@@ -120,7 +120,7 @@ enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
-    /// Foreground Linux FUSE mount. Unmount with fusermount3 -u MOUNTPOINT.
+    /// Foreground FUSE mount. Use umount on macOS or fusermount3 -u on Linux.
     Mount {
         mountpoint: PathBuf,
     },

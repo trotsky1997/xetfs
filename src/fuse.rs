@@ -90,6 +90,7 @@ pub fn mount(fs: FileSystem, mountpoint: &Path) -> anyhow::Result<()> {
         "mountpoint must be empty"
     );
     eprintln!("Mounting XetFS at {} (foreground)", mountpoint.display());
+    #[cfg(target_os = "linux")]
     let options = vec![
         MountOption::FSName("xetfs".into()),
         MountOption::Subtype("xetfs".into()),
@@ -98,24 +99,31 @@ pub fn mount(fs: FileSystem, mountpoint: &Path) -> anyhow::Result<()> {
         MountOption::NoSuid,
         MountOption::RW,
     ];
-    #[cfg(target_os = "macos")]
-    let options = {
-        let mut options = options;
-        options.push(MountOption::CUSTOM("backend=fskit".into()));
-        options
+    let filesystem = XetFuse {
+        fs,
+        dirs: HashMap::new(),
+        next_dir: 1,
     };
-    fuser::mount2(
-        XetFuse {
-            fs,
-            dirs: HashMap::new(),
-            next_dir: 1,
-        },
-        mountpoint,
-        &options,
-    )?;
+    #[cfg(target_os = "linux")]
+    fuser::mount2(filesystem, mountpoint, &options)?;
+    #[cfg(target_os = "macos")]
+    macfuse::mount(filesystem, &mountpoint)?;
     Ok(())
 }
+#[cfg(target_os = "macos")]
+#[path = "macfuse.rs"]
+mod macfuse;
+
 impl Filesystem for XetFuse {
+    #[cfg(target_os = "macos")]
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        config: &mut fuser::KernelConfig,
+    ) -> std::result::Result<(), libc::c_int> {
+        config.set_max_write(128 * 1024).map_err(|_| libc::EINVAL)?;
+        Ok(())
+    }
     fn destroy(&mut self) {
         if let Err(e) = self.fs.sync_all() {
             eprintln!("XetFS unmount sync failed: {e}");

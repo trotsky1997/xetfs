@@ -1,6 +1,6 @@
 # XetFS
 
-Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及 macOS/Linux 均可使用的仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。macOS 的 macFUSE 适配正在开发，尚未完成真实挂载验证。
+Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 和 macOS macFUSE 挂载，以及仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。
 
 实现依据是 [Hugging Face Xet 概览](https://huggingface.co/docs/hub/en/xet/index)、[开放协议](https://huggingface.co/docs/xet/index)及其 Rust 参考实现。分块、块哈希、Merkle 哈希和 Xorb 块编码已经用固定版本的官方数据核对。
 
@@ -37,7 +37,7 @@ cargo build --release --locked
 cargo test --locked --all-targets
 ```
 
-仓库中的 `bin/` 保存历史 macOS/Linux 构建。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
+仓库中的 `bin/` 保存历史 macOS/Linux 构建；当前功能请从源码构建。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
 
 以下示例创建独立仓库，导入本地文件并读取：
 
@@ -151,7 +151,7 @@ Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直
 
 ## 挂载
 
-Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。`fuser` 使用 Rust 挂载实现，无需链接 libfuse 开发库。
+Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。macOS 需要安装并启用 macFUSE 5，构建时需要其 libfuse 和 MFMount.framework。macOS 挂载使用 macFUSE 的 FSKit 后端。
 
 ```sh
 mkdir ./mountpoint
@@ -161,10 +161,11 @@ $XETFS_BIN --repo ./demo.repo mount ./mountpoint
 此命令在前台运行。另一个终端可使用 `cp`、`cat`、`mv`、`ln`、Python 文件 API 等访问挂载目录。卸载：
 
 ```sh
-fusermount3 -u ./mountpoint
+fusermount3 -u ./mountpoint  # Linux
+umount ./mountpoint          # macOS
 ```
 
-挂载点必须为空，并与仓库目录分离。挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
+挂载点必须为空，并与仓库目录分离。Linux 挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
 
 ## 快照与回收
 
@@ -198,11 +199,9 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 ## 当前边界
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
-- 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
+- macOS macFUSE 挂载已在独立目录验证读写、重挂载和 `fsck`；macOS 系统对部分位置的挂载有权限限制。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。
 - Linux FUSE 使用直接 I/O 和串行回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。
 
 结构、提交顺序和格式约束见 [ARCHITECTURE.md](ARCHITECTURE.md)。代码采用 Apache-2.0；算法依据与测试数据来源见 [THIRD_PARTY.md](THIRD_PARTY.md)。
-
-macOS 开发状态：Rust FUSE 后端可链接 macFUSE 5，并支持仓库扩展属性。`fuser` 0.16 使用设备文件描述符，macFUSE 的 FSKit 后端使用 MFMount 消息通道；当前版本尚未接通该通道，独立目录挂载尚未成功。
