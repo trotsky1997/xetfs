@@ -186,6 +186,7 @@ impl Filesystem for XetFuse {
             Err(e) => reply.error(e.errno()),
         }
     }
+    #[allow(clippy::unnecessary_cast)] // libc mode types differ on macOS and Linux.
     fn mknod(
         &mut self,
         req: &Request<'_>,
@@ -516,6 +517,7 @@ impl Filesystem for XetFuse {
                 .set_xattr(ino, name.as_bytes(), None, XattrPolicy::Remove),
         );
     }
+    #[allow(clippy::unnecessary_cast)] // libc statvfs field types differ by platform.
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let path = match CString::new(self.fs.repository().path().as_os_str().as_bytes()) {
             Ok(p) => p,
