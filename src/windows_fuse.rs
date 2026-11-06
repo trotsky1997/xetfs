@@ -438,6 +438,11 @@ impl FileSystemInterface for Mount {
         buffer: &mut [u8],
     ) -> Result<(), NTSTATUS> {
         let target = link_target(buffer)?;
+        for unit in buffer[20..].chunks_exact_mut(2) {
+            if unit == [b'/', 0] {
+                unit[0] = b'\\';
+            }
+        }
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         fs.set_windows_symlink(h.ino, &target, buffer)
             .map_err(status)
