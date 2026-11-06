@@ -18,6 +18,8 @@ XetFS 的 Rust 文件系统、SQLite schema、CLI 与验证脚本位于本仓库
 | --- | --- |
 | blake3 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | fuser | MIT |
+| winfsp_wrs、winfsp_wrs_sys、winfsp_wrs_build | MIT |
+| [WinFsp 运行时](https://github.com/winfsp/winfsp/blob/master/License.txt) | GPL-3.0，含开源软件链接例外 |
 | rusqlite | MIT |
 | lz4_flex | MIT |
 | clap、serde、serde_json、anyhow、thiserror、tempfile | MIT OR Apache-2.0 |

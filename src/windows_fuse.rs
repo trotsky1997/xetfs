@@ -1,7 +1,7 @@
 //! Windows mount adapter over WinFsp.
 use crate::{Error, FileSystem, Kind, Node, SetAttr};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use winfsp_wrs::{
@@ -20,8 +20,7 @@ struct Handle {
 struct Mount {
     fs: Mutex<FileSystem>,
     security: SecurityDescriptor,
-    total: u64,
-    free: u64,
+    storage: PathBuf,
 }
 
 fn status(error: Error) -> NTSTATUS {
@@ -83,8 +82,9 @@ impl FileSystemInterface for Mount {
     type FileContext = Arc<Handle>;
     const GET_VOLUME_INFO_DEFINED: bool = true;
     fn get_volume_info(&self) -> Result<VolumeInfo, NTSTATUS> {
-        VolumeInfo::new(self.total, self.free, u16str!("XetFS"))
-            .map_err(|_| STATUS_INVALID_PARAMETER)
+        let total = fs2::total_space(&self.storage).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let free = fs2::available_space(&self.storage).map_err(|_| STATUS_UNSUCCESSFUL)?;
+        VolumeInfo::new(total, free, u16str!("XetFS")).map_err(|_| STATUS_INVALID_PARAMETER)
     }
     const GET_SECURITY_BY_NAME_DEFINED: bool = true;
     fn get_security_by_name(
@@ -339,13 +339,11 @@ pub fn mount(fs: FileSystem, mountpoint: &Path) -> anyhow::Result<()> {
         .set_file_info_timeout(0)
         .set_file_system_name(u16cstr!("XetFS"))
         .map_err(|e| anyhow::anyhow!("volume name: {e:?}"))?;
-    let total = fs2::total_space(fs.repository().path())?;
-    let free = fs2::available_space(fs.repository().path())?;
+    let storage = fs.repository().path().to_path_buf();
     let context = Mount {
         fs: Mutex::new(fs),
         security: user_security()?,
-        total,
-        free,
+        storage,
     };
     let host = WinFileSystem::start(
         Params {

@@ -1,13 +1,12 @@
 name: Mount platform check
 on:
   push:
-    branches: [macos-fskit-support, xetfs-windows-work]
+    branches: [macos-fskit-support]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   linux:
-    if: github.ref_name != 'xetfs-windows-work'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -33,11 +32,11 @@ jobs:
       - name: Install WinFsp
         run: choco install winfsp -y --version=2.0.23075
       - name: Build Windows executable
-        run: cargo build --locked --no-default-features
+        run: cargo build --release --locked --no-default-features
       - name: Mount, read/write, remount and measure deduplication
-        run: python scripts/windows_mount_acceptance.py target/debug/xetfs.exe --report results/windows-mount.json
+        run: python scripts/windows_mount_acceptance.py target/release/xetfs.exe --report results/windows-mount.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-build-results
+          name: windows-mount-results
           path: results/

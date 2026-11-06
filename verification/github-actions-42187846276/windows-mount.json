@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "platform": "windows-winfsp",
+  "copies": 4,
+  "bytes_per_file": 8388608,
+  "logical_bytes": 33554432,
+  "xorb_bytes": 8389640,
+  "data_savings_fraction": 0.7499692440032959,
+  "write_fsync_seconds": [
+    0.1778259000000162,
+    0.057927899999867805,
+    0.06410720000008041,
+    0.05904479999981049
+  ],
+  "read_seconds": [
+    0.021014500000092085,
+    0.018382799999926647,
+    0.01838399999996909,
+    0.018368100000088816
+  ],
+  "sha256": "cf11c5ec6b035d0f3c7aec06c684d9967c5b416dda46bd94a98f24deae2b9886",
+  "fsck": {
+    "xorbs_verified": 1,
+    "chunks_verified": 129,
+    "recipes_verified": 2
+  }
+}

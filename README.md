@@ -1,6 +1,6 @@
 # XetFS
 
-Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 和 macOS macFUSE 挂载，以及仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。
+Rust 编写的本地内容寻址文件系统，提供 Linux FUSE、macOS macFUSE 和 Windows WinFsp 挂载，以及仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。
 
 实现依据是 [Hugging Face Xet 概览](https://huggingface.co/docs/hub/en/xet/index)、[开放协议](https://huggingface.co/docs/xet/index)及其 Rust 参考实现。分块、块哈希、Merkle 哈希和 Xorb 块编码已经用固定版本的官方数据核对。
 
@@ -151,7 +151,7 @@ Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直
 
 ## 挂载
 
-Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。macOS 需要安装并启用 macFUSE 5，构建时需要其 libfuse 和 MFMount.framework。macOS 挂载使用 macFUSE 的 FSKit 后端。
+Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。macOS 需要安装并启用 macFUSE 5，构建时需要其 libfuse 和 MFMount.framework。macOS 挂载使用 macFUSE 的 FSKit 后端。Windows 需要安装 WinFsp；构建需要其开发文件。
 
 ```sh
 mkdir ./mountpoint
@@ -163,6 +163,12 @@ $XETFS_BIN --repo ./demo.repo mount ./mountpoint
 ```sh
 fusermount3 -u ./mountpoint  # Linux
 umount ./mountpoint          # macOS
+```
+
+Windows 使用空闲盘符挂载，并通过 Ctrl+C 卸载：
+
+```powershell
+xetfs.exe --repo C:\path\to\repository mount X:
 ```
 
 挂载点必须为空，并与仓库目录分离。Linux 挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
@@ -204,7 +210,11 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 在 GitHub Actions 的 Linux x86-64 runner 上使用 release 构建、FUSE 挂载和新仓库，写入 4 份相同的 8 MiB 随机数据并逐份校验。逻辑总量 32 MiB，仓库实际分配 8,658,944 字节（含元数据），节省约 74.2%。单次 8 MiB 写入并 fsync：首次 0.176 秒，后续三次 0.062–0.074 秒；单次读取 0.0059–0.0082 秒。这是一轮小样本测量，受缓存和 runner 环境影响。
 
-挂载验收覆盖随机读写、链接、重命名、重挂载和进程异常终止后的 fsync 恢复。原始报告见 [GitHub Actions 测量结果](verification/github-actions-42185397024/linux-dedup.json)及[挂载验收结果](verification/github-actions-42185397024/linux-acceptance.json)。Windows runner 构建检查暴露 Unix 平台接口依赖，Windows 挂载需要相应后端。
+挂载验收覆盖随机读写、链接、重命名、重挂载和进程异常终止后的 fsync 恢复。原始报告见 [GitHub Actions 测量结果](verification/github-actions-42185397024/linux-dedup.json)及[挂载验收结果](verification/github-actions-42185397024/linux-acceptance.json)。
+
+## Windows GitHub Actions 实测
+
+Windows Server 2025 的 GitHub Actions runner 使用 WinFsp 2.0 和 release 构建完成实际挂载、4 份相同 8 MiB 随机文件的写入与逐份校验、卸载后重挂载读取及 `fsck`。逻辑总量为 32 MiB，数据对象占 8,389,640 字节，按数据对象大小节省约 75.0%。首次 8 MiB 写入并 fsync 耗时 0.178 秒，重复写入 0.058–0.064 秒，读取 0.018–0.021 秒；这些数字来自单次运行，受缓存和 runner 环境影响。原始结果见 [Windows 挂载测量](verification/github-actions-42187846276/windows-mount.json)。
 
 ## 当前边界
 

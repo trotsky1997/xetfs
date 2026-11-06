@@ -119,7 +119,7 @@ enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
-    /// Foreground FUSE mount. Use umount on macOS or fusermount3 -u on Linux.
+    /// Foreground mount. On Windows, pass an available drive letter.
     Mount {
         mountpoint: PathBuf,
     },
