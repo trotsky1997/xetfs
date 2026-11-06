@@ -200,6 +200,12 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 在 macFUSE FSKit 挂载点写入并逐份校验 4 份相同的 8 MiB 随机文件，逻辑总量为 32 MiB。数据对象增加 8,389,680 字节，仓库实际分配空间增加 9,834,496 字节（含元数据），按实际分配空间计算节省约 70.7%。测试使用不可压缩随机数据，数字取决于文件内容和仓库状态。
 
+## Linux GitHub Actions 实测
+
+在 GitHub Actions 的 Linux x86-64 runner 上使用 release 构建、FUSE 挂载和新仓库，写入 4 份相同的 8 MiB 随机数据并逐份校验。逻辑总量 32 MiB，仓库实际分配 8,658,944 字节（含元数据），节省约 74.2%。单次 8 MiB 写入并 fsync：首次 0.176 秒，后续三次 0.062–0.074 秒；单次读取 0.0059–0.0082 秒。这是一轮小样本测量，受缓存和 runner 环境影响。
+
+挂载验收覆盖随机读写、链接、重命名、重挂载和进程异常终止后的 fsync 恢复。原始报告见 [GitHub Actions 测量结果](verification/github-actions-42185397024/linux-dedup.json)及[挂载验收结果](verification/github-actions-42185397024/linux-acceptance.json)。Windows runner 构建检查暴露 Unix 平台接口依赖，Windows 挂载需要相应后端。
+
 ## 当前边界
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
