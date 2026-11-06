@@ -1129,7 +1129,9 @@ impl TrampolineInterface {
 
         match C::get_reparse_point_by_name(fs, file_name, is_directory != 0, buffer) {
             Ok(bytes_transferred) => {
-                psize.write(bytes_transferred as SIZE_T);
+                if !psize.is_null() {
+                    psize.write(bytes_transferred as SIZE_T);
+                }
                 STATUS_SUCCESS
             }
             Err(e) => e,
