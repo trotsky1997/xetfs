@@ -183,6 +183,11 @@ impl FileSystemInterface for Mount {
         name: &U16CStr,
         find_reparse: impl Fn() -> Option<FileAttributes>,
     ) -> Result<(FileAttributes, SecurityDescriptor, bool), NTSTATUS> {
+        if std::env::var_os("XETFS_TRACE_WINDOWS").is_some()
+            && name.to_string_lossy().contains("link")
+        {
+            eprintln!("security {name:?}");
+        }
         let found = {
             let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
             match Self::lookup(&fs, name) {
@@ -407,6 +412,9 @@ impl FileSystemInterface for Mount {
         _: bool,
         buffer: Option<&mut [u8]>,
     ) -> Result<usize, NTSTATUS> {
+        if std::env::var_os("XETFS_TRACE_WINDOWS").is_some() {
+            eprintln!("reparse by name {name:?}");
+        }
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let node = Self::lookup(&fs, name)?;
         if node.kind != Kind::Symlink {
