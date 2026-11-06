@@ -509,6 +509,9 @@ impl FileSystem {
         {
             return errno(libc::EINVAL);
         }
+        if self.stages.contains_key(&ino) {
+            return Err(Error::Busy);
+        }
         if node.kind == Kind::Directory && !self.list(ino)?.is_empty() {
             return errno(libc::ENOTEMPTY);
         }

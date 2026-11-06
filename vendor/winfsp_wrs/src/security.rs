@@ -3,7 +3,7 @@ use windows_sys::Win32::{
     Foundation::{STATUS_SUCCESS, LocalFree},
     Security::{
         Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION},
-        GetSecurityDescriptorLength, OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION,
+        GetSecurityDescriptorLength, OWNER_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, SACL_SECURITY_INFORMATION,
     },
 };
 use winfsp_wrs_sys::{
@@ -119,7 +119,7 @@ impl SecurityDescriptor {
             let mut len = 0;
             if ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 self.as_ptr().ptr, SDDL_REVISION,
-                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION,
                 &mut ptr, &mut len,
             ) == 0 {
                 return Err("Cannot serialize security descriptor".into());

@@ -196,9 +196,6 @@ impl FileSystemInterface for Mount {
         security_information: u32,
         modification: PSecurityDescriptor,
     ) -> Result<(), NTSTATUS> {
-        if security_information & 0x8 != 0 {
-            return Err(STATUS_ACCESS_DENIED);
-        }
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let updated = self
             .security_for(&fs, h.ino)?
