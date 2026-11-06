@@ -7,6 +7,7 @@ import msvcrt
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import random
 import signal
@@ -85,6 +86,13 @@ def main():
                     started = time.perf_counter()
                     assert hashlib.sha256(path.read_bytes()).digest() == digest
                     reads.append(time.perf_counter() - started)
+                folder = root / 'subdirectory'
+                folder.mkdir()
+                (root / 'copy-3').rename(folder / 'renamed')
+                assert [p.name for p in folder.iterdir()] == ['renamed']
+                assert hashlib.sha256((folder / 'renamed').read_bytes()).digest() == digest
+                (folder / 'renamed').rename(root / 'copy-3')
+                folder.rmdir()
                 stop(proc); proc = None
                 stats = cli('stats'); fsck = cli('fsck')
                 allocation = allocated_bytes(repo) - initial_allocation
@@ -94,7 +102,7 @@ def main():
                 for i in range(4):
                     assert hashlib.sha256((root / f'copy-{i}').read_bytes()).digest() == digest
                 stop(proc); proc = None
-                result = {'status':'passed','platform':'windows-winfsp','copies':4,
+                result = {'status':'passed','platform':'windows-winfsp','system':platform.platform(),'copies':4,
                     'bytes_per_file':len(data),'logical_bytes':4*len(data),'xorb_bytes':stats['xorb_bytes'],
                     'data_savings_fraction':1-stats['xorb_bytes']/(4*len(data)),
                     'repository_allocated_increase_bytes':allocation,
