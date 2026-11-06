@@ -111,6 +111,19 @@ fn info(fs: &FileSystem, node: &Node) -> FileInfo {
     result
 }
 impl Mount {
+    fn lookup(fs: &FileSystem, name: &U16CStr) -> Result<Node, NTSTATUS> {
+        let name = path(name)?;
+        let mut node = fs.node(1).map_err(status)?;
+        for part in name.split('/').filter(|part| !part.is_empty()) {
+            if node.kind != Kind::Directory {
+                return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+            }
+            node = fs
+                .lookup(node.ino, std::ffi::OsStr::new(part))
+                .map_err(status)?;
+        }
+        Ok(node)
+    }
     fn security_for(&self, fs: &FileSystem, ino: u64) -> Result<SecurityDescriptor, NTSTATUS> {
         match fs.get_xattr(ino, SECURITY_XATTR) {
             Ok(bytes) => {
@@ -152,16 +165,24 @@ impl FileSystemInterface for Mount {
         name: &U16CStr,
         find_reparse: impl Fn() -> Option<FileAttributes>,
     ) -> Result<(FileAttributes, SecurityDescriptor, bool), NTSTATUS> {
-        if let Some(index) = find_reparse() {
-            return Ok((index, self.security.clone(), true));
+        let found = {
+            let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+            match Self::lookup(&fs, name) {
+                Ok(node) => Ok((
+                    attributes(&fs, &node),
+                    self.security_for(&fs, node.ino)?,
+                    false,
+                )),
+                Err(e) => Err(e),
+            }
+        };
+        match found {
+            Ok(found) => Ok(found),
+            Err(e) => match find_reparse() {
+                Some(index) => Ok((index, self.security.clone(), true)),
+                None => Err(e),
+            },
         }
-        let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let node = fs.resolve_nofollow(path(name)?).map_err(status)?;
-        Ok((
-            attributes(&fs, &node),
-            self.security_for(&fs, node.ino)?,
-            false,
-        ))
     }
     const GET_SECURITY_DEFINED: bool = true;
     fn get_security(&self, h: Self::FileContext) -> Result<SecurityDescriptor, NTSTATUS> {
@@ -199,7 +220,7 @@ impl FileSystemInterface for Mount {
         _: FileAccessRights,
     ) -> Result<(Self::FileContext, FileInfo), NTSTATUS> {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let node = fs.resolve_nofollow(path(name)?).map_err(status)?;
+        let node = Self::lookup(&fs, name)?;
         Self::open_node(&mut fs, node)
     }
     const CREATE_DEFINED: bool = true;
@@ -372,7 +393,7 @@ impl FileSystemInterface for Mount {
         buffer: Option<&mut [u8]>,
     ) -> Result<usize, NTSTATUS> {
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let node = fs.resolve_nofollow(path(name)?).map_err(status)?;
+        let node = Self::lookup(&fs, name)?;
         if node.kind != Kind::Symlink {
             return Err(STATUS_OBJECT_NAME_NOT_FOUND);
         }
