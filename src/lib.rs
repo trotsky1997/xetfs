@@ -13,6 +13,8 @@ pub mod remote_fuse;
 mod repository;
 mod s3_backend;
 pub mod s3_server;
+#[cfg(windows)]
+pub mod windows_fuse;
 pub mod xorb;
 
 pub use error::{Error, Result};

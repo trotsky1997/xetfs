@@ -30,19 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check Windows build
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force results | Out-Null
-          $env:CARGO_TERM_COLOR = 'never'
-          cargo check --locked --no-default-features --lib *> results/windows-build.log
-          $code = $LASTEXITCODE
-          Get-Content results/windows-build.log
-          if ($code -ne 0) { exit $code }
-          if (-not (Test-Path 'src/windows_fuse.rs')) {
-            Write-Error 'Windows mount backend is not present; mount, read/write and deduplication checks require it.'
-            exit 1
-          }
+      - name: Install WinFsp
+        run: choco install winfsp -y --version=2.0.23075
+      - name: Build Windows executable
+        run: cargo build --release --locked --no-default-features
+      - name: Mount, read/write, remount and measure deduplication
+        run: python scripts/windows_mount_acceptance.py target/release/xetfs.exe --report results/windows-mount.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

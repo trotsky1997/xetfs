@@ -767,10 +767,15 @@ fn main() -> Result<()> {
         Command::Mount { mountpoint } => {
             #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
             xetfs::fuse::mount(fs, &mountpoint)?;
-            #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "fuse")))]
+            #[cfg(windows)]
+            xetfs::windows_fuse::mount(fs, &mountpoint)?;
+            #[cfg(not(any(
+                windows,
+                all(any(target_os = "linux", target_os = "macos"), feature = "fuse")
+            )))]
             {
                 let _ = mountpoint;
-                anyhow::bail!("FUSE mounting requires Linux or macOS and the fuse Cargo feature");
+                anyhow::bail!("mounting requires Windows or FUSE on Linux/macOS");
             }
         }
         Command::Init | Command::Hash { .. } | Command::InspectXorb { .. } | Command::S3 { .. } => {

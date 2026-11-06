@@ -50,6 +50,13 @@ fuser = { version = "0.16", optional = true, default-features = false, features 
 [target.'cfg(target_os = "macos")'.dependencies]
 fuser = { version = "0.16", optional = true, default-features = false, features = ["libfuse", "abi-7-31"] }
 
+[target.'cfg(windows)'.dependencies]
+winfsp_wrs = "=0.4.1"
+ctrlc = "3"
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp_wrs_build = "=0.4.1"
+
 [profile.release]
 lto = "thin"
 strip = true
