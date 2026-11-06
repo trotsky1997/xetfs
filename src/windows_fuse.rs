@@ -54,7 +54,7 @@ fn attributes(fs: &FileSystem, node: &Node) -> FileAttributes {
                 | if directory {
                     FileAttributes::DIRECTORY
                 } else {
-                    FileAttributes::NORMAL
+                    FileAttributes(0)
                 }
         }
         _ => FileAttributes::NORMAL,
@@ -67,15 +67,33 @@ fn link_target(buffer: &[u8]) -> Result<Vec<u8>, NTSTATUS> {
     {
         return Err(STATUS_INVALID_PARAMETER);
     }
-    let offset = u16::from_le_bytes(buffer[12..14].try_into().unwrap()) as usize;
-    let len = u16::from_le_bytes(buffer[14..16].try_into().unwrap()) as usize;
-    let end = 20usize
-        .checked_add(offset)
-        .and_then(|n| n.checked_add(len))
-        .ok_or(STATUS_INVALID_PARAMETER)?;
-    if offset % 2 != 0 || len == 0 || len % 2 != 0 || end > buffer.len() {
+    let substitute_offset = u16::from_le_bytes(buffer[8..10].try_into().unwrap()) as usize;
+    let substitute_len = u16::from_le_bytes(buffer[10..12].try_into().unwrap()) as usize;
+    let print_offset = u16::from_le_bytes(buffer[12..14].try_into().unwrap()) as usize;
+    let print_len = u16::from_le_bytes(buffer[14..16].try_into().unwrap()) as usize;
+    let flags = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+    let valid_range = |offset: usize, len: usize| {
+        offset % 2 == 0
+            && len % 2 == 0
+            && 20usize
+                .checked_add(offset)
+                .and_then(|n| n.checked_add(len))
+                .is_some_and(|end| end <= buffer.len())
+    };
+    if buffer.len() > 16_384
+        || flags > 1
+        || substitute_len == 0
+        || !valid_range(substitute_offset, substitute_len)
+        || !valid_range(print_offset, print_len)
+    {
         return Err(STATUS_INVALID_PARAMETER);
     }
+    let (offset, len) = if print_len == 0 {
+        (substitute_offset, substitute_len)
+    } else {
+        (print_offset, print_len)
+    };
+    let end = 20 + offset + len;
     let units: Vec<u16> = buffer[20 + offset..end]
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))

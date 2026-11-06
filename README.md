@@ -220,7 +220,7 @@ Windows Server 2025 的 GitHub Actions runner 使用 WinFsp 2.0 和 release 构�
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
 - macOS macFUSE 挂载已在独立目录验证读写、重挂载和 `fsck`；macOS 系统对部分位置的挂载有权限限制。
-- Windows 卷使用启动用户和 SYSTEM 的统一访问控制；Windows ACL 修改和符号链接操作暂不提供。
+- Windows 卷持久化文件和目录 ACL，支持通过 WinFsp 创建和访问符号链接。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。
 - Linux FUSE 使用直接 I/O 和串行回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。

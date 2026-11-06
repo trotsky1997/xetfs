@@ -98,6 +98,9 @@ def main():
                 os.symlink('../copy-0', root / 'links' / 'file-link')
                 os.symlink('links', root / 'dir-link', target_is_directory=True)
                 assert (root / 'links' / 'file-link').read_bytes() == data
+                with (root / 'links' / 'file-link').open('r+b') as linked:
+                    assert linked.write(data[:1]) == 1
+                    linked.flush(); os.fsync(linked.fileno())
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
                 assert os.readlink(root / 'links' / 'file-link') == '../copy-0'
                 acl_file = root / 'copy-0'
