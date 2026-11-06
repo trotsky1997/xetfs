@@ -2,6 +2,7 @@
 """Mount an isolated WinFsp volume, verify durable read/write and deduplication."""
 import argparse
 import ctypes
+import csv
 from ctypes import wintypes
 import msvcrt
 import hashlib
@@ -103,6 +104,17 @@ def main():
                 subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
                 acl_before = subprocess.check_output(['icacls', str(acl_file)], text=True)
                 assert 'DENY' in acl_before
+                sid = next(csv.reader(subprocess.check_output(
+                    ['whoami', '/user', '/fo', 'csv', '/nh'], text=True).splitlines()))[1]
+                blocked = root / 'copy-1'
+                subprocess.run(['icacls', str(blocked), '/deny', f'*{sid}:(R)'], check=True, capture_output=True)
+                try:
+                    blocked.read_bytes()
+                    raise AssertionError('ACL did not deny read access')
+                except PermissionError:
+                    pass
+                subprocess.run(['icacls', str(blocked), '/remove:d', f'*{sid}'], check=True, capture_output=True)
+                assert hashlib.sha256(blocked.read_bytes()).digest() == digest
                 stop(proc); proc = None
                 stats = cli('stats'); fsck = cli('fsck')
                 allocation = allocated_bytes(repo) - initial_allocation
