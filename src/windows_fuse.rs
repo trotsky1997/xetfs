@@ -410,7 +410,7 @@ impl FileSystemInterface for Mount {
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let node = Self::lookup(&fs, name)?;
         if node.kind != Kind::Symlink {
-            return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+            return Err(winfsp_wrs::STATUS_NOT_A_REPARSE_POINT);
         }
         let value = fs.get_xattr(node.ino, REPARSE_XATTR).map_err(status)?;
         let raw = value.get(1..).ok_or(STATUS_INVALID_PARAMETER)?;

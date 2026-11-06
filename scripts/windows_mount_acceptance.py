@@ -102,7 +102,7 @@ def main():
                     assert linked.write(data[:1]) == 1
                     linked.flush(); os.fsync(linked.fileno())
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
-                assert os.readlink(root / 'links' / 'file-link') == '../copy-0'
+                assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
                 acl_file = root / 'copy-0'
                 subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
                 acl_before = subprocess.check_output(['icacls', str(acl_file)], text=True)
@@ -128,7 +128,7 @@ def main():
                     assert hashlib.sha256((root / f'copy-{i}').read_bytes()).digest() == digest
                 assert (root / 'links' / 'file-link').read_bytes() == data
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
-                assert os.readlink(root / 'links' / 'file-link') == '../copy-0'
+                assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
                 acl_after = subprocess.check_output(['icacls', str(root / 'copy-0')], text=True)
                 assert 'DENY' in acl_after
                 (root / 'links' / 'file-link').unlink()
