@@ -108,7 +108,7 @@ impl SecurityDescriptor {
             }
 
             let descriptor = Self::from_ptr_and_len(ptr, len as usize);
-            LocalFree(ptr as isize);
+            LocalFree(ptr.cast());
             Ok(descriptor)
         }
     }
@@ -125,7 +125,7 @@ impl SecurityDescriptor {
                 return Err("Cannot serialize security descriptor".into());
             }
             let result = U16CStr::from_ptr_str(ptr).to_string().map_err(|e| e.to_string());
-            LocalFree(ptr as isize);
+            LocalFree(ptr.cast());
             result
         }
     }
