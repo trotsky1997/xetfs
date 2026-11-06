@@ -93,6 +93,16 @@ def main():
                 assert hashlib.sha256((folder / 'renamed').read_bytes()).digest() == digest
                 (folder / 'renamed').rename(root / 'copy-3')
                 folder.rmdir()
+                (root / 'links').mkdir()
+                os.symlink('../copy-0', root / 'links' / 'file-link')
+                os.symlink('links', root / 'dir-link', target_is_directory=True)
+                assert (root / 'links' / 'file-link').read_bytes() == data
+                assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert os.readlink(root / 'links' / 'file-link') == '../copy-0'
+                acl_file = root / 'copy-0'
+                subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
+                acl_before = subprocess.check_output(['icacls', str(acl_file)], text=True)
+                assert 'DENY' in acl_before
                 stop(proc); proc = None
                 stats = cli('stats'); fsck = cli('fsck')
                 allocation = allocated_bytes(repo) - initial_allocation
@@ -101,6 +111,14 @@ def main():
                 proc = start()
                 for i in range(4):
                     assert hashlib.sha256((root / f'copy-{i}').read_bytes()).digest() == digest
+                assert (root / 'links' / 'file-link').read_bytes() == data
+                assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert os.readlink(root / 'links' / 'file-link') == '../copy-0'
+                acl_after = subprocess.check_output(['icacls', str(root / 'copy-0')], text=True)
+                assert 'DENY' in acl_after
+                (root / 'links' / 'file-link').unlink()
+                (root / 'dir-link').rmdir()
+                (root / 'links').rmdir()
                 stop(proc); proc = None
                 result = {'status':'passed','platform':'windows-winfsp','system':platform.platform(),'copies':4,
                     'bytes_per_file':len(data),'logical_bytes':4*len(data),'xorb_bytes':stats['xorb_bytes'],

@@ -172,6 +172,7 @@ impl FileSystem {
             None,
             None,
             0,
+            None,
         )
     }
     pub(crate) fn cas_repository_mut(&mut self) -> &mut Repository {
@@ -389,6 +390,7 @@ impl FileSystem {
         copy_xattrs: Option<u64>,
         birthtime: Option<i64>,
         flags: u32,
+        initial_xattr: Option<(&[u8], &[u8])>,
     ) -> Result<Node> {
         let dir = self.directory(parent)?;
         Self::name(name)?;
@@ -413,6 +415,12 @@ impl FileSystem {
             "INSERT INTO entries VALUES (?1,?2,?3)",
             params![parent, name, ino],
         )?;
+        if let Some((name, value)) = initial_xattr {
+            tx.execute(
+                "INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3)",
+                params![ino, name, value],
+            )?;
+        }
         if let Some(source) = copy_xattrs {
             tx.execute(
                 "INSERT INTO inode_xattrs SELECT ?1,name,value FROM inode_xattrs WHERE ino=?2",
@@ -448,8 +456,102 @@ impl FileSystem {
             None,
             None,
             0,
+            None,
         )
     }
+    #[cfg(windows)]
+    pub(crate) fn create_windows(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        directory: bool,
+        security: &[u8],
+    ) -> Result<Node> {
+        let content = if directory {
+            None
+        } else {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        };
+        self.create_node(
+            parent,
+            name.as_encoded_bytes(),
+            if directory {
+                Kind::Directory
+            } else {
+                Kind::File
+            },
+            if directory { 0o755 } else { 0o644 },
+            0,
+            0,
+            content.as_deref(),
+            0,
+            None,
+            None,
+            None,
+            0,
+            Some((b"user.xetfs.windows.security", security)),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_windows_symlink(
+        &mut self,
+        ino: u64,
+        target: &[u8],
+        raw: &[u8],
+    ) -> Result<()> {
+        let node = self.node(ino)?;
+        if target.is_empty()
+            || target.len() > 4096
+            || target.contains(&0)
+            || node.size != 0
+            || node.kind == Kind::Symlink
+        {
+            return errno(libc::EINVAL);
+        }
+        if node.kind == Kind::Directory && !self.list(ino)?.is_empty() {
+            return errno(libc::ENOTEMPTY);
+        }
+        let mut value = vec![u8::from(node.kind == Kind::Directory)];
+        value.extend_from_slice(raw);
+        let tx = self.repo.conn.transaction()?;
+        tx.execute(
+            "UPDATE inodes SET kind=3,content=NULL,target=?1,size=?2,ctime=?3 WHERE ino=?4",
+            params![target, target.len(), now_ns(), ino],
+        )?;
+        tx.execute(
+            "INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3)",
+            params![ino, b"user.xetfs.windows.reparse".as_slice(), value],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn delete_windows_symlink(&mut self, ino: u64) -> Result<()> {
+        let node = self.node(ino)?;
+        if node.kind != Kind::Symlink {
+            return errno(libc::EINVAL);
+        }
+        let value = self.get_xattr(ino, b"user.xetfs.windows.reparse")?;
+        let directory = value.first() == Some(&1);
+        let content = if directory {
+            None
+        } else {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        };
+        let tx = self.repo.conn.transaction()?;
+        tx.execute(
+            "UPDATE inodes SET kind=?1,content=?2,target=NULL,size=0,ctime=?3 WHERE ino=?4",
+            params![if directory { 2 } else { 1 }, content, now_ns(), ino],
+        )?;
+        tx.execute(
+            "DELETE FROM inode_xattrs WHERE ino=?1 AND name=?2",
+            params![ino, b"user.xetfs.windows.reparse".as_slice()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn mkdir(
         &mut self,
         parent: u64,
@@ -471,6 +573,7 @@ impl FileSystem {
             None,
             None,
             0,
+            None,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -522,6 +625,7 @@ impl FileSystem {
             None,
             birthtime,
             flags,
+            None,
         )
     }
     pub fn mkdir_all(&mut self, path: impl AsRef<Path>) -> Result<Node> {
@@ -579,6 +683,7 @@ impl FileSystem {
             None,
             None,
             0,
+            None,
         )
     }
     pub fn link(&mut self, ino: u64, parent: u64, name: &OsStr) -> Result<Node> {
@@ -760,6 +865,7 @@ impl FileSystem {
                 None,
                 None,
                 0,
+                None,
             )
         }
     }
@@ -784,6 +890,7 @@ impl FileSystem {
             Some(node.ino),
             None,
             node.flags,
+            None,
         )
     }
     fn ensure_stage(&mut self, ino: u64) -> Result<&mut Stage> {
