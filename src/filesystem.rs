@@ -473,6 +473,7 @@ impl FileSystem {
             0,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn create_with_birthtime(
         &mut self,
         parent: u64,

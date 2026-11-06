@@ -244,10 +244,10 @@ pub(super) fn mount(fs: XetFuse, path: &Path) -> anyhow::Result<()> {
     let reader_stop = bridge.try_clone()?;
     let reader_thread = thread::spawn(move || {
         let result = receive(r_channel, reader, r_pending);
-        if let Err(ref e) = result {
-            if e.raw_os_error() != Some(libc::ENODEV) {
-                eprintln!("macFUSE receive: {e}");
-            }
+        if let Err(ref e) = result
+            && e.raw_os_error() != Some(libc::ENODEV)
+        {
+            eprintln!("macFUSE receive: {e}");
         }
         let _ = reader_stop.shutdown(std::net::Shutdown::Both);
         let _ = session_stop.shutdown(std::net::Shutdown::Both);
@@ -295,10 +295,10 @@ pub(super) fn mount(fs: XetFuse, path: &Path) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("macFUSE reply thread failed"))?;
     anyhow::ensure!(mount_result == 0, "macFUSE mount failed: {mount_result}");
     result?;
-    if let Err(error) = receive_result {
-        if error.raw_os_error() != Some(libc::ENODEV) {
-            return Err(error.into());
-        }
+    if let Err(error) = receive_result
+        && error.raw_os_error() != Some(libc::ENODEV)
+    {
+        return Err(error.into());
     }
     reply_result?;
     Ok(())

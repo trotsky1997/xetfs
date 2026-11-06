@@ -1183,41 +1183,6 @@ impl Repository {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn upload_xorb_chunk_ranges_use_uncompressed_offsets() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut fs = crate::FileSystem::new(Repository::init(dir.path().join("repo")).unwrap());
-        let mut data = vec![0x5a; 256 * 1024];
-        let midpoint = data.len() / 2;
-        data[midpoint..].fill(0x5b);
-        let node = fs.put_file("/compressed", data.as_slice()).unwrap();
-        let content = node.content.as_deref().unwrap();
-        let recipe = fs.repository().reconstruction(content).unwrap();
-        let xorb = fs
-            .repository()
-            .read_upload_xorb(&recipe.terms[0].xorb)
-            .unwrap();
-
-        assert!(xorb.chunks.len() >= 2);
-        let mut raw_offset = 0;
-        for chunk in &xorb.chunks {
-            assert_eq!(chunk.offset, raw_offset);
-            raw_offset += chunk.len;
-        }
-        assert_eq!(raw_offset, xorb.raw_bytes);
-        // The physical compressed offsets differ after the first chunk; this
-        // guards against accidentally serializing local storage offsets into
-        // the public MDB shard's raw byte ranges.
-        assert!(xorb.chunks[1].offset > 0);
-        assert!(xorb.chunks[1].offset > xorb.chunks[0].offset);
-        assert!((xorb.bytes.len() as u64) < xorb.raw_bytes);
-    }
-}
-
 impl Repository {
     pub(crate) fn import_cas_chunks(
         &mut self,
@@ -1334,5 +1299,40 @@ impl Repository {
         }
         tx.commit()?;
         Ok((id, size))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_xorb_chunk_ranges_use_uncompressed_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut fs = crate::FileSystem::new(Repository::init(dir.path().join("repo")).unwrap());
+        let mut data = vec![0x5a; 256 * 1024];
+        let midpoint = data.len() / 2;
+        data[midpoint..].fill(0x5b);
+        let node = fs.put_file("/compressed", data.as_slice()).unwrap();
+        let content = node.content.as_deref().unwrap();
+        let recipe = fs.repository().reconstruction(content).unwrap();
+        let xorb = fs
+            .repository()
+            .read_upload_xorb(&recipe.terms[0].xorb)
+            .unwrap();
+
+        assert!(xorb.chunks.len() >= 2);
+        let mut raw_offset = 0;
+        for chunk in &xorb.chunks {
+            assert_eq!(chunk.offset, raw_offset);
+            raw_offset += chunk.len;
+        }
+        assert_eq!(raw_offset, xorb.raw_bytes);
+        // The physical compressed offsets differ after the first chunk; this
+        // guards against accidentally serializing local storage offsets into
+        // the public MDB shard's raw byte ranges.
+        assert!(xorb.chunks[1].offset > 0);
+        assert!(xorb.chunks[1].offset > xorb.chunks[0].offset);
+        assert!((xorb.bytes.len() as u64) < xorb.raw_bytes);
     }
 }
