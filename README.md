@@ -196,6 +196,10 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 实测包含：官方 CSV 的 796 个分块边界及块哈希、文件/Xorb/verification 哈希、官方 Xorb 解码后的完整字节比对、跨 Xorb 大文件读取、导入中断回滚、快照与 GC、真实内核挂载及 SIGKILL 后 fsync 数据恢复。性能基准对同一 128 MiB 数据集运行三次，记录优化前后的中位数；Hub 只读拉取也在固定公开 revision 上完成并核对 SHA-256。具体环境和指标见 [验证记录](verification/README.md)。
 
+## macOS 去重实测
+
+在 macFUSE FSKit 挂载点写入并逐份校验 4 份相同的 8 MiB 随机文件，逻辑总量为 32 MiB。数据对象增加 8,389,680 字节，仓库实际分配空间增加 9,834,496 字节（含元数据），按实际分配空间计算节省约 70.7%。测试使用不可压缩随机数据，数字取决于文件内容和仓库状态。
+
 ## 当前边界
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
