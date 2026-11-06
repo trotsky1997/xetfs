@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Mount an isolated WinFsp volume, verify durable read/write and deduplication."""
 import argparse
+import ctypes
+from ctypes import wintypes
+import msvcrt
 import hashlib
 import json
 import os
@@ -10,6 +13,25 @@ import signal
 import subprocess
 import tempfile
 import time
+
+
+def allocated_bytes(root):
+    class FileStandardInfo(ctypes.Structure):
+        _fields_ = [('allocation', ctypes.c_int64), ('end_of_file', ctypes.c_int64),
+                    ('links', wintypes.DWORD), ('delete_pending', ctypes.c_ubyte),
+                    ('directory', ctypes.c_ubyte)]
+    api = ctypes.WinDLL('kernel32', use_last_error=True)
+    api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    api.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    total = 0
+    for path in root.rglob('*'):
+        if path.is_file():
+            with path.open('rb') as file:
+                info = FileStandardInfo()
+                if not api.GetFileInformationByHandleEx(msvcrt.get_osfhandle(file.fileno()), 1, ctypes.byref(info), ctypes.sizeof(info)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                total += info.allocation
+    return total
 
 
 def main():
@@ -29,6 +51,7 @@ def main():
         def cli(*argv):
             return json.loads(subprocess.check_output([binary, '--repo', str(repo), *map(str, argv)]))
         cli('init')
+        initial_allocation = allocated_bytes(repo)
         with open(Path(temp) / 'mount.log', 'w+') as log:
             def start():
                 proc = subprocess.Popen([binary, '--repo', str(repo), 'mount', drive],
@@ -64,6 +87,7 @@ def main():
                     reads.append(time.perf_counter() - started)
                 stop(proc); proc = None
                 stats = cli('stats'); fsck = cli('fsck')
+                allocation = allocated_bytes(repo) - initial_allocation
                 assert stats['logical_bytes'] == 4 * len(data)
                 assert stats['xorb_bytes'] < 2 * len(data)
                 proc = start()
@@ -73,6 +97,8 @@ def main():
                 result = {'status':'passed','platform':'windows-winfsp','copies':4,
                     'bytes_per_file':len(data),'logical_bytes':4*len(data),'xorb_bytes':stats['xorb_bytes'],
                     'data_savings_fraction':1-stats['xorb_bytes']/(4*len(data)),
+                    'repository_allocated_increase_bytes':allocation,
+                    'repository_savings_fraction':1-allocation/(4*len(data)),
                     'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck}
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2)+'\n')

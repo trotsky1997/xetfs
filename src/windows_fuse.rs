@@ -313,7 +313,7 @@ fn user_security() -> anyhow::Result<SecurityDescriptor> {
         output.status.success(),
         "whoami could not identify the user"
     );
-    let text = String::from_utf8(output.stdout)?;
+    let text = String::from_utf8_lossy(&output.stdout);
     let sid = text
         .split('"')
         .find(|part| part.starts_with("S-1-"))
