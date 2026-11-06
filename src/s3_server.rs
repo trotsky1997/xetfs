@@ -20,7 +20,6 @@ use std::{
     ffi::OsStr,
     io::Write,
     net::SocketAddr,
-    os::unix::ffi::OsStrExt,
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -285,7 +284,8 @@ fn remove_directory_tree(fs: &mut FileSystem, directory: u64) -> S3Result<()> {
         .list(directory)
         .map_err(|err| s3_error!(InternalError, "list directory: {err}"))?
     {
-        let name = OsStr::from_bytes(&entry.name);
+        let name = crate::platform::name_from_bytes(&entry.name)
+            .map_err(|err| s3_error!(InternalError, "invalid file name: {err}"))?;
         if entry.node.kind == Kind::Directory {
             remove_directory_tree(fs, entry.node.ino)?;
             fs.unlink(directory, name, true)
@@ -397,8 +397,8 @@ impl S3 for Gateway {
                 1,
                 OsStr::new(&bucket),
                 0o755,
-                unsafe { libc::getuid() },
-                unsafe { libc::getgid() },
+                crate::platform::owner().0,
+                crate::platform::owner().1,
             )
             .map_err(|err| s3_error!(InternalError, "create bucket: {err}"))?;
             Ok(S3Response::new(CreateBucketOutput::default()))

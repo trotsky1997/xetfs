@@ -5,7 +5,6 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     net::SocketAddr,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
 use xetfs::{FileSystem, Kind, Repository, S3BackendConfig, SetAttr, chunker::Chunker, hash};
@@ -375,7 +374,12 @@ fn remove(fs: &mut FileSystem, parent: u64, name: &OsStr, recursive: bool) -> Re
     let node = fs.lookup(parent, name)?;
     if node.kind == Kind::Directory && recursive {
         for entry in fs.list(node.ino)? {
-            remove(fs, node.ino, OsStr::from_bytes(&entry.name), true)?;
+            remove(
+                fs,
+                node.ino,
+                xetfs::platform::name_from_bytes(&entry.name)?,
+                true,
+            )?;
         }
     }
     fs.unlink(parent, name, node.kind == Kind::Directory)?;
@@ -538,8 +542,8 @@ fn main() -> Result<()> {
         Repository::open(&cli.repo)
             .with_context(|| format!("open repository {}", cli.repo.display()))?,
     );
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+    let uid = xetfs::platform::owner().0;
+    let gid = xetfs::platform::owner().1;
     match cli.command {
         Command::Transfer {
             command: TransferCommand::Export { path, destination },
@@ -626,13 +630,13 @@ fn main() -> Result<()> {
                 fs.mkdir_all(path)?
             } else {
                 let (p, n) = fs.path_parent(path)?;
-                fs.mkdir(p, OsStr::from_bytes(&n), 0o755, uid, gid)?
+                fs.mkdir(p, xetfs::platform::name_from_bytes(&n)?, 0o755, uid, gid)?
             };
             json(&n)?;
         }
         Command::Rm { path, recursive } => {
             let (p, n) = fs.path_parent(path)?;
-            remove(&mut fs, p, OsStr::from_bytes(&n), recursive)?;
+            remove(&mut fs, p, xetfs::platform::name_from_bytes(&n)?, recursive)?;
         }
         Command::Mv {
             from,
@@ -643,9 +647,9 @@ fn main() -> Result<()> {
             let (q, m) = fs.path_parent(to)?;
             fs.rename(
                 p,
-                OsStr::from_bytes(&n),
+                xetfs::platform::name_from_bytes(&n)?,
                 q,
-                OsStr::from_bytes(&m),
+                xetfs::platform::name_from_bytes(&m)?,
                 no_replace,
             )?;
         }
@@ -659,13 +663,17 @@ fn main() -> Result<()> {
             let node = if symbolic {
                 fs.symlink(
                     p,
-                    OsStr::from_bytes(&n),
-                    target.as_os_str().as_bytes(),
+                    xetfs::platform::name_from_bytes(&n)?,
+                    target.as_os_str().as_encoded_bytes(),
                     uid,
                     gid,
                 )?
             } else {
-                fs.link(fs.resolve_nofollow(target)?.ino, p, OsStr::from_bytes(&n))?
+                fs.link(
+                    fs.resolve_nofollow(target)?.ino,
+                    p,
+                    xetfs::platform::name_from_bytes(&n)?,
+                )?
             };
             json(&node)?;
         }

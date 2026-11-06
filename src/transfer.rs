@@ -7,9 +7,11 @@ use std::{
     collections::BTreeMap,
     fs::{self, File},
     io::{Cursor, Read, Write},
-    os::unix::fs::PermissionsExt,
     path::{Component, Path},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 // shortcut: monolithic manifests are bounded at 8 MiB; shard recipes before serving larger bundles.
 pub const MAX_MANIFEST: u64 = 8 * 1024 * 1024;
@@ -171,7 +173,7 @@ pub fn export(fs: &FileSystem, path: &Path, destination: &Path) -> Result<serde_
     );
     durable(&destination.join("manifest.json"), &bytes)?;
     File::open(destination.join("chunks"))?.sync_all()?;
-    File::open(destination)?.sync_all()?;
+    crate::repository::sync_dir(destination)?;
     Ok(
         serde_json::json!({"bundle":sha(&bytes),"chunks":manifest.chunks.len(),"entries":manifest.entries.len(),"stored_bytes":manifest.chunks.values().map(|c| c.stored).sum::<u64>()}),
     )
@@ -266,7 +268,14 @@ pub fn restore(
                 && hash::to_hex(&hash::file_hash(&recipe)) == *entry.content.as_ref().unwrap(),
             "file recipe mismatch"
         );
+        #[cfg(unix)]
         output.set_permissions(fs::Permissions::from_mode(entry.mode))?;
+        #[cfg(windows)]
+        {
+            let mut permissions = output.metadata()?.permissions();
+            permissions.set_readonly(entry.mode & 0o222 == 0);
+            output.set_permissions(permissions)?;
+        }
         output.sync_all()?;
         logical_bytes += size;
     }
@@ -278,10 +287,17 @@ pub fn restore(
         .filter(|e| e.content.is_none())
     {
         let path = destination.join(&entry.path);
-        File::open(&path)?.sync_all()?;
-        fs::set_permissions(path, fs::Permissions::from_mode(entry.mode))?;
+        crate::repository::sync_dir(&path)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(entry.mode))?;
+        #[cfg(windows)]
+        {
+            let mut permissions = fs::metadata(&path)?.permissions();
+            permissions.set_readonly(entry.mode & 0o222 == 0);
+            fs::set_permissions(&path, permissions)?;
+        }
     }
-    File::open(destination)?.sync_all()?;
+    crate::repository::sync_dir(destination)?;
     Ok(
         serde_json::json!({"bundle":expected,"logical_bytes":logical_bytes,"entries":manifest.entries.len()}),
     )

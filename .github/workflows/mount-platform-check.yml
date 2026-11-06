@@ -1,12 +1,13 @@
 name: Mount platform check
 on:
   push:
-    branches: [macos-fskit-support]
+    branches: [macos-fskit-support, xetfs-windows-work]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   linux:
+    if: github.ref_name != 'xetfs-windows-work'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

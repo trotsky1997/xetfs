@@ -5,6 +5,7 @@ mod filesystem;
 #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]
 pub mod fuse;
 pub mod hash;
+pub mod platform;
 pub mod remote;
 pub mod remote_cas;
 #[cfg(all(target_os = "linux", feature = "fuse"))]

@@ -8,7 +8,6 @@ use std::{
     collections::{HashMap, VecDeque},
     ffi::OsStr,
     io::{Read, Seek, SeekFrom},
-    os::unix::{ffi::OsStrExt, fs::FileExt},
     path::Path,
 };
 
@@ -165,8 +164,8 @@ impl FileSystem {
             &name,
             Kind::File,
             0o400,
-            unsafe { libc::getuid() },
-            unsafe { libc::getgid() },
+            crate::platform::owner().0,
+            crate::platform::owner().1,
             Some(id),
             size,
             None,
@@ -241,7 +240,7 @@ impl FileSystem {
     }
     pub fn lookup(&self, parent: u64, name: &OsStr) -> Result<Node> {
         self.directory(parent)?;
-        let name = name.as_bytes();
+        let name = name.as_encoded_bytes();
         if name == b"." {
             return self.node(parent);
         }
@@ -280,10 +279,10 @@ impl FileSystem {
             .collect()
     }
     pub fn resolve(&self, path: impl AsRef<Path>) -> Result<Node> {
-        self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), true, None)
+        self.resolve_bytes(path.as_ref().as_os_str().as_encoded_bytes(), true, None)
     }
     pub fn resolve_nofollow(&self, path: impl AsRef<Path>) -> Result<Node> {
-        self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), false, None)
+        self.resolve_bytes(path.as_ref().as_os_str().as_encoded_bytes(), false, None)
     }
     fn view_node(&self, ino: u64, snapshot: Option<&str>) -> Result<Node> {
         match snapshot {
@@ -356,7 +355,7 @@ impl FileSystem {
         Ok(node)
     }
     pub fn path_parent(&self, path: impl AsRef<Path>) -> Result<(u64, Vec<u8>)> {
-        let bytes = path.as_ref().as_os_str().as_bytes();
+        let bytes = path.as_ref().as_os_str().as_encoded_bytes();
         let end = bytes
             .iter()
             .rposition(|b| *b != b'/')
@@ -393,7 +392,10 @@ impl FileSystem {
     ) -> Result<Node> {
         let dir = self.directory(parent)?;
         Self::name(name)?;
-        if self.lookup(parent, OsStr::from_bytes(name)).is_ok() {
+        if self
+            .lookup(parent, crate::platform::name_from_bytes(name)?)
+            .is_ok()
+        {
             return errno(libc::EEXIST);
         }
         let gid = if dir.mode & 0o2000 != 0 { dir.gid } else { gid };
@@ -435,7 +437,7 @@ impl FileSystem {
         let (empty, _) = self.repo.ingest(std::io::empty())?;
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::File,
             mode,
             uid,
@@ -458,7 +460,7 @@ impl FileSystem {
     ) -> Result<Node> {
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::Directory,
             mode,
             uid,
@@ -508,7 +510,7 @@ impl FileSystem {
         };
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             kind,
             mode,
             uid,
@@ -526,18 +528,20 @@ impl FileSystem {
         for name in path
             .as_ref()
             .as_os_str()
-            .as_bytes()
+            .as_encoded_bytes()
             .split(|b| *b == b'/')
             .filter(|n| !n.is_empty())
         {
-            let name = OsStr::from_bytes(name);
+            let name = crate::platform::name_from_bytes(name)?;
             let node = match self.lookup(ino, name) {
                 Ok(node) => node,
-                Err(Error::Errno(libc::ENOENT)) => {
-                    self.mkdir(ino, name, 0o755, unsafe { libc::getuid() }, unsafe {
-                        libc::getgid()
-                    })?
-                }
+                Err(Error::Errno(libc::ENOENT)) => self.mkdir(
+                    ino,
+                    name,
+                    0o755,
+                    crate::platform::owner().0,
+                    crate::platform::owner().1,
+                )?,
                 Err(e) => return Err(e),
             };
             if node.kind != Kind::Directory {
@@ -563,7 +567,7 @@ impl FileSystem {
         }
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::Symlink,
             0o777,
             uid,
@@ -582,7 +586,7 @@ impl FileSystem {
             return errno(libc::EPERM);
         }
         self.directory(parent)?;
-        Self::name(name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
         if self.lookup(parent, name).is_ok() {
             return errno(libc::EEXIST);
         }
@@ -590,7 +594,7 @@ impl FileSystem {
         let now = now_ns();
         tx.execute(
             "INSERT INTO entries VALUES (?1,?2,?3)",
-            params![parent, name.as_bytes(), ino],
+            params![parent, name.as_encoded_bytes(), ino],
         )?;
         tx.execute("UPDATE inodes SET ctime=?1 WHERE ino=?2", params![now, ino])?;
         tx.execute(
@@ -620,12 +624,12 @@ impl FileSystem {
         } else if node.kind == Kind::Directory {
             return errno(libc::EISDIR);
         }
-        Self::name(name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
         let tx = self.repo.conn.transaction()?;
         let now = now_ns();
         tx.execute(
             "DELETE FROM entries WHERE parent=?1 AND name=?2",
-            params![parent, name.as_bytes()],
+            params![parent, name.as_encoded_bytes()],
         )?;
         tx.execute(
             "UPDATE inodes SET ctime=?1 WHERE ino=?2",
@@ -646,8 +650,8 @@ impl FileSystem {
         new_name: &OsStr,
         no_replace: bool,
     ) -> Result<()> {
-        Self::name(name.as_bytes())?;
-        Self::name(new_name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
+        Self::name(new_name.as_encoded_bytes())?;
         let src = self.lookup(parent, name)?;
         self.directory(new_parent)?;
         let dest = match self.lookup(new_parent, new_name) {
@@ -688,11 +692,16 @@ impl FileSystem {
         let tx = self.repo.conn.transaction()?;
         tx.execute(
             "DELETE FROM entries WHERE parent=?1 AND name=?2",
-            params![new_parent, new_name.as_bytes()],
+            params![new_parent, new_name.as_encoded_bytes()],
         )?;
         tx.execute(
             "UPDATE entries SET parent=?1,name=?2 WHERE parent=?3 AND name=?4",
-            params![new_parent, new_name.as_bytes(), parent, name.as_bytes()],
+            params![
+                new_parent,
+                new_name.as_encoded_bytes(),
+                parent,
+                name.as_encoded_bytes()
+            ],
         )?;
         tx.execute(
             "UPDATE inodes SET ctime=?1 WHERE ino=?2",
@@ -723,7 +732,10 @@ impl FileSystem {
             if self.handles.values().any(|h| h.ino == n.ino) {
                 return Err(Error::Busy);
             }
-        } else if self.lookup(parent, OsStr::from_bytes(&name)).is_ok() {
+        } else if self
+            .lookup(parent, crate::platform::name_from_bytes(&name)?)
+            .is_ok()
+        {
             return errno(libc::EEXIST);
         }
         let (id, size) = self.repo.ingest(input)?;
@@ -739,8 +751,8 @@ impl FileSystem {
                 &name,
                 Kind::File,
                 0o644,
-                unsafe { libc::getuid() },
-                unsafe { libc::getgid() },
+                crate::platform::owner().0,
+                crate::platform::owner().1,
                 Some(&id),
                 size,
                 None,
@@ -763,8 +775,8 @@ impl FileSystem {
             &name,
             Kind::File,
             node.mode,
-            unsafe { libc::getuid() },
-            unsafe { libc::getgid() },
+            crate::platform::owner().0,
+            crate::platform::owner().1,
             node.content.as_deref(),
             node.size,
             None,
@@ -807,7 +819,7 @@ impl FileSystem {
             });
         }
         if flags & libc::O_TRUNC != 0 {
-            if flags & libc::O_ACCMODE == libc::O_RDONLY {
+            if flags & crate::platform::ACCESS_MODE == libc::O_RDONLY {
                 return errno(libc::EACCES);
             }
             self.setattr(
@@ -837,7 +849,7 @@ impl FileSystem {
         let size = (node.size - offset).min(size as u64) as usize;
         if let Some(stage) = self.stages.get(&ino) {
             let mut data = vec![0; size];
-            stage.file.as_file().read_exact_at(&mut data, offset)?;
+            crate::platform::read_exact_at(stage.file.as_file(), &mut data, offset)?;
             Ok(data)
         } else {
             self.repo.read_content(
@@ -878,20 +890,20 @@ impl FileSystem {
     }
     pub fn read_handle(&self, fh: u64, offset: u64, size: usize) -> Result<Vec<u8>> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;
-        if h.flags & libc::O_ACCMODE == libc::O_WRONLY {
+        if h.flags & crate::platform::ACCESS_MODE == libc::O_WRONLY {
             return errno(libc::EBADF);
         }
         self.read_inode(h.ino, offset, size)
     }
     pub fn write_handle(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<usize> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;
-        if h.flags & libc::O_ACCMODE == libc::O_RDONLY {
+        if h.flags & crate::platform::ACCESS_MODE == libc::O_RDONLY {
             return errno(libc::EBADF);
         }
         let (ino, append, sync) = (
             h.ino,
             h.flags & libc::O_APPEND != 0,
-            h.flags & (libc::O_SYNC | libc::O_DSYNC) != 0,
+            h.flags & crate::platform::SYNC_FLAGS != 0,
         );
         if data.is_empty() {
             return Ok(0);
@@ -908,7 +920,7 @@ impl FileSystem {
         {
             return errno(libc::EFBIG);
         }
-        let written = stage.file.as_file().write_at(data, offset)?;
+        let written = crate::platform::write_at(stage.file.as_file(), data, offset)?;
         if written == 0 {
             return Ok(0);
         }
@@ -1016,8 +1028,11 @@ impl FileSystem {
         offset: u64,
         size: usize,
     ) -> Result<Vec<u8>> {
-        let node =
-            self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), true, Some(snapshot))?;
+        let node = self.resolve_bytes(
+            path.as_ref().as_os_str().as_encoded_bytes(),
+            true,
+            Some(snapshot),
+        )?;
         if node.kind != Kind::File {
             return errno(libc::EISDIR);
         }

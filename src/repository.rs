@@ -15,7 +15,6 @@ use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::FileExt as UnixFileExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -137,7 +136,18 @@ pub(crate) fn now_ns() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {
-    File::open(path)?.sync_all()?;
+    #[cfg(unix)]
+    let dir = File::open(path)?;
+    #[cfg(windows)]
+    let dir = {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(0x0200_0000)
+            .open(path)?
+    };
+    dir.sync_all()?;
     Ok(())
 }
 
@@ -208,7 +218,7 @@ impl UploadSnapshot {
         let length = (self.size - offset).min(size as u64) as usize;
         if let UploadSnapshotSource::Staged(file) = &self.source {
             let mut bytes = vec![0; length];
-            file.read_exact_at(&mut bytes, offset)?;
+            crate::platform::read_exact_at(file, &mut bytes, offset)?;
             return Ok(bytes);
         }
 
@@ -378,7 +388,7 @@ impl Repository {
         let tx = conn.transaction()?;
         tx.execute_batch(include_str!("schema.sql"))?;
         let now = now_ns();
-        tx.execute("INSERT INTO inodes(ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime) VALUES(1,2,?1,?2,?3,0,?4,?4,?4,?4)", params![0o755,unsafe {libc::getuid()},unsafe {libc::getgid()},now])?;
+        tx.execute("INSERT INTO inodes(ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime) VALUES(1,2,?1,?2,?3,0,?4,?4,?4,?4)", params![0o755,crate::platform::owner().0,crate::platform::owner().1,now])?;
         tx.commit()?;
         sync_dir(&root)?;
         Ok(Self {
