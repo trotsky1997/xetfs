@@ -291,11 +291,24 @@ impl FileSystem {
             Some(s) => Ok(self.repo.conn.query_row("SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,flags,content,target,1 FROM snapshot_nodes WHERE snapshot=?1 AND ino=?2",params![s,ino],Node::row).optional()?.ok_or(Error::Errno(libc::ENOENT))?),
         }
     }
+    #[cfg(windows)]
+    pub(crate) fn resolve_from(&self, parent: u64, path: &[u8]) -> Result<Node> {
+        self.resolve_bytes_from(path, true, None, parent)
+    }
     fn resolve_bytes(
         &self,
         path: &[u8],
         follow_final: bool,
         snapshot: Option<&str>,
+    ) -> Result<Node> {
+        self.resolve_bytes_from(path, follow_final, snapshot, 1)
+    }
+    fn resolve_bytes_from(
+        &self,
+        path: &[u8],
+        follow_final: bool,
+        snapshot: Option<&str>,
+        parent: u64,
     ) -> Result<Node> {
         if path.is_empty() || path.contains(&0) {
             return errno(libc::ENOENT);
@@ -305,7 +318,7 @@ impl FileSystem {
             .filter(|p| !p.is_empty())
             .map(Vec::from)
             .collect();
-        let mut ino = 1;
+        let mut ino = if path.starts_with(b"/") { 1 } else { parent };
         let mut links = 0;
         while let Some(name) = queue.pop_front() {
             let parent_node = self.view_node(ino, snapshot)?;
