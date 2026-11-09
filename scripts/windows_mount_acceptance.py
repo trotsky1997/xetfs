@@ -154,6 +154,12 @@ def main():
                 assert os.path.islink(root / 'unix-links' / 'dangling')
                 assert not (root / 'unix-links' / 'dangling').exists()
                 assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
+                (root / 'unix-links' / 'relative').unlink()
+                (root / 'unix-links' / 'absolute').unlink()
+                (root / 'unix-links' / 'directory').rmdir()
+                (root / 'unix-links' / 'dangling').unlink()
+                assert hashlib.sha256((root / 'copy-0').read_bytes()).digest() == digest
+                assert (root / 'links').is_dir()
                 acl_after = subprocess.check_output(['icacls', str(root / 'copy-0')], text=True)
                 assert 'DENY' in acl_after
                 (root / 'links' / 'file-link').unlink()
