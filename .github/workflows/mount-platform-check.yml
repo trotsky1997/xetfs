@@ -7,8 +7,6 @@ permissions:
   contents: read
 jobs:
   windows:
-    env:
-      XETFS_TRACE_WINDOWS: "1"
     runs-on: windows-latest
     timeout-minutes: 45
     steps:

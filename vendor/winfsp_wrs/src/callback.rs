@@ -1165,7 +1165,7 @@ impl TrampolineInterface {
         buffer: PVOID,
         p_size: PSIZE_T,
     ) -> NTSTATUS {
-        let result = FspFileSystemResolveReparsePoints(
+        FspFileSystemResolveReparsePoints(
             file_system,
             Some(Self::get_reparse_point_by_name_ext::<C>),
             std::ptr::null_mut(),
@@ -1175,11 +1175,7 @@ impl TrampolineInterface {
             p_io_status,
             buffer,
             p_size,
-        );
-        if std::env::var_os("XETFS_TRACE_WINDOWS").is_some() {
-            eprintln!("resolve {:?}, index {}, last {}, result {:#x}, status {:#x}, info {:#x}", U16CStr::from_ptr_str(file_name), reparse_point_index, resolve_last_path_component, result, (*p_io_status).__bindgen_anon_1.Status, (*p_io_status).Information);
-        }
-        result
+        )
     }
 
     /// Get reparse point.

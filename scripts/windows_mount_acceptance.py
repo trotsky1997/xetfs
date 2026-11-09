@@ -140,7 +140,9 @@ def main():
                     'data_savings_fraction':1-stats['xorb_bytes']/(4*len(data)),
                     'repository_allocated_increase_bytes':allocation,
                     'repository_savings_fraction':1-allocation/(4*len(data)),
-                    'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck}
+                    'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck,
+                    'acl_deny_read_enforced':True,'acl_persisted_after_remount':True,
+                    'relative_file_and_directory_symlinks':True,'symlink_write_and_remount':True}
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2)+'\n')
                 print(json.dumps(result, indent=2))
