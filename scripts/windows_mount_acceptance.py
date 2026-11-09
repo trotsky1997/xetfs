@@ -121,6 +121,11 @@ def main():
                 assert (root / 'unix-links' / 'directory' / 'file-link').read_bytes() == data
                 assert os.path.islink(root / 'unix-links' / 'dangling')
                 assert not (root / 'unix-links' / 'dangling').exists()
+                try:
+                    (root / 'unix-links' / 'backslash').read_bytes()
+                    raise AssertionError('Unix backslash was interpreted as a Windows separator')
+                except OSError:
+                    pass
                 assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
                 acl_file = root / 'copy-0'
                 subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
