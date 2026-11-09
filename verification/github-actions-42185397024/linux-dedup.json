@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "platform": "linux-fuse",
+  "copies": 4,
+  "bytes_per_file": 8388608,
+  "logical_bytes": 33554432,
+  "xorb_bytes": 8389640,
+  "repository_allocated_bytes": 8658944,
+  "data_savings_fraction": 0.7499692440032959,
+  "repository_savings_fraction": 0.741943359375,
+  "write_fsync_seconds": [
+    0.17627298499996868,
+    0.07441515599998638,
+    0.06230416200003219,
+    0.06340541199995187
+  ],
+  "read_seconds": [
+    0.008199436999916543,
+    0.007860097000047972,
+    0.005885353000053328,
+    0.006004301000075429
+  ],
+  "sha256": "cf11c5ec6b035d0f3c7aec06c684d9967c5b416dda46bd94a98f24deae2b9886",
+  "fsck": {
+    "xorbs_verified": 1,
+    "chunks_verified": 129,
+    "recipes_verified": 2
+  }
+}

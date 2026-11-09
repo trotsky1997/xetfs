@@ -1,0 +1,34 @@
+{
+  "status": "passed",
+  "platform": "windows-winfsp",
+  "system": "Windows-2025Server-10.0.26100-SP0",
+  "copies": 4,
+  "bytes_per_file": 8388608,
+  "logical_bytes": 33554432,
+  "xorb_bytes": 8422223,
+  "data_savings_fraction": 0.7489981949329376,
+  "repository_allocated_increase_bytes": 8609792,
+  "repository_savings_fraction": 0.743408203125,
+  "write_fsync_seconds": [
+    0.9474519999998847,
+    0.4469787999998971,
+    0.4409954000000198,
+    0.4284556000000066
+  ],
+  "read_seconds": [
+    0.0493407000001298,
+    0.04906540000001769,
+    0.05096670000011727,
+    0.05247989999998026
+  ],
+  "sha256": "cf11c5ec6b035d0f3c7aec06c684d9967c5b416dda46bd94a98f24deae2b9886",
+  "fsck": {
+    "xorbs_verified": 2,
+    "chunks_verified": 130,
+    "recipes_verified": 3
+  },
+  "acl_deny_read_enforced": true,
+  "acl_persisted_after_remount": true,
+  "relative_file_and_directory_symlinks": true,
+  "symlink_write_and_remount": true
+}

@@ -1,0 +1,18 @@
+[package]
+name = "xetfs-fskit"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+xetfs = { path = "..", default-features = false }
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSError", "NSString", "NSData"] }
+objc2-fs-kit = "0.3"
+block2 = "0.6"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

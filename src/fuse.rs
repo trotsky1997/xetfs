@@ -1,4 +1,4 @@
-use crate::{Error, FileSystem, Kind, Node, Result, SetAttr};
+use crate::{Error, FileSystem, Kind, Node, Result, SetAttr, XattrPolicy};
 use fuser::*;
 use std::{
     collections::HashMap,
@@ -10,6 +10,7 @@ use std::{
 
 const TTL: Duration = Duration::ZERO;
 const DIRECT_IO: u32 = 1;
+const RENAME_NOREPLACE: u32 = 1;
 fn time(ns: i64) -> SystemTime {
     if ns >= 0 {
         UNIX_EPOCH + Duration::from_nanos(ns as u64)
@@ -42,7 +43,7 @@ fn attr(n: &Node) -> FileAttr {
         atime: time(n.atime_ns),
         mtime: time(n.mtime_ns),
         ctime: time(n.ctime_ns),
-        crtime: time(n.ctime_ns),
+        crtime: time(n.birthtime_ns),
         kind: kind(n.kind),
         perm: n.mode as u16,
         nlink: n.nlink,
@@ -50,7 +51,7 @@ fn attr(n: &Node) -> FileAttr {
         gid: n.gid,
         rdev: 0,
         blksize: 65536,
-        flags: 0,
+        flags: n.flags,
     }
 }
 fn empty(reply: ReplyEmpty, r: Result<()>) {
@@ -88,26 +89,41 @@ pub fn mount(fs: FileSystem, mountpoint: &Path) -> anyhow::Result<()> {
         std::fs::read_dir(&mountpoint)?.next().is_none(),
         "mountpoint must be empty"
     );
-    eprintln!("XetFS mounted at {} (foreground)", mountpoint.display());
-    fuser::mount2(
-        XetFuse {
-            fs,
-            dirs: HashMap::new(),
-            next_dir: 1,
-        },
-        mountpoint,
-        &[
-            MountOption::FSName("xetfs".into()),
-            MountOption::Subtype("xetfs".into()),
-            MountOption::DefaultPermissions,
-            MountOption::NoDev,
-            MountOption::NoSuid,
-            MountOption::RW,
-        ],
-    )?;
+    eprintln!("Mounting XetFS at {} (foreground)", mountpoint.display());
+    #[cfg(target_os = "linux")]
+    let options = vec![
+        MountOption::FSName("xetfs".into()),
+        MountOption::Subtype("xetfs".into()),
+        MountOption::DefaultPermissions,
+        MountOption::NoDev,
+        MountOption::NoSuid,
+        MountOption::RW,
+    ];
+    let filesystem = XetFuse {
+        fs,
+        dirs: HashMap::new(),
+        next_dir: 1,
+    };
+    #[cfg(target_os = "linux")]
+    fuser::mount2(filesystem, mountpoint, &options)?;
+    #[cfg(target_os = "macos")]
+    macfuse::mount(filesystem, &mountpoint)?;
     Ok(())
 }
+#[cfg(target_os = "macos")]
+#[path = "macfuse.rs"]
+mod macfuse;
+
 impl Filesystem for XetFuse {
+    #[cfg(target_os = "macos")]
+    fn init(
+        &mut self,
+        _req: &Request<'_>,
+        config: &mut fuser::KernelConfig,
+    ) -> std::result::Result<(), libc::c_int> {
+        config.set_max_write(128 * 1024).map_err(|_| libc::EINVAL)?;
+        Ok(())
+    }
     fn destroy(&mut self) {
         if let Err(e) = self.fs.sync_all() {
             eprintln!("XetFS unmount sync failed: {e}");
@@ -155,6 +171,8 @@ impl Filesystem for XetFuse {
                 size,
                 atime_ns: atime.map(ns),
                 mtime_ns: mtime.map(ns),
+                birthtime_ns: _crtime.map(|t| ns(TimeOrNow::SpecificTime(t))),
+                flags: _flags,
             },
         ) {
             Ok(n) => reply.attr(&TTL, &attr(&n)),
@@ -168,6 +186,7 @@ impl Filesystem for XetFuse {
             Err(e) => reply.error(e.errno()),
         }
     }
+    #[allow(clippy::unnecessary_cast)] // libc mode types differ on macOS and Linux.
     fn mknod(
         &mut self,
         req: &Request<'_>,
@@ -178,7 +197,7 @@ impl Filesystem for XetFuse {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        if mode & libc::S_IFMT != libc::S_IFREG {
+        if mode & libc::S_IFMT as u32 != libc::S_IFREG as u32 {
             reply.error(libc::EOPNOTSUPP);
             return;
         }
@@ -234,7 +253,7 @@ impl Filesystem for XetFuse {
         flags: u32,
         reply: ReplyEmpty,
     ) {
-        if flags & !libc::RENAME_NOREPLACE != 0 {
+        if flags & !RENAME_NOREPLACE != 0 {
             reply.error(libc::EOPNOTSUPP);
             return;
         }
@@ -245,7 +264,7 @@ impl Filesystem for XetFuse {
                 name,
                 new_parent,
                 new_name,
-                flags & libc::RENAME_NOREPLACE != 0,
+                flags & RENAME_NOREPLACE != 0,
             ),
         );
     }
@@ -429,6 +448,76 @@ impl Filesystem for XetFuse {
     ) {
         reply.ok();
     }
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        flags: i32,
+        position: u32,
+        reply: ReplyEmpty,
+    ) {
+        if position != 0 {
+            reply.error(libc::EOPNOTSUPP);
+            return;
+        }
+        let policy = match flags {
+            0 => XattrPolicy::Set,
+            libc::XATTR_CREATE => XattrPolicy::Create,
+            libc::XATTR_REPLACE => XattrPolicy::Replace,
+            _ => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+        empty(
+            reply,
+            self.fs.set_xattr(ino, name.as_bytes(), Some(value), policy),
+        );
+    }
+    fn getxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        match self.fs.get_xattr(ino, name.as_bytes()) {
+            Ok(value) if size == 0 => reply.size(value.len() as u32),
+            Ok(value) if value.len() <= size as usize => reply.data(&value),
+            Ok(_) => reply.error(libc::ERANGE),
+            Err(error) => reply.error(error.errno()),
+        }
+    }
+    fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+        match self.fs.list_xattrs(ino) {
+            Ok(names) => {
+                let mut data = Vec::new();
+                for name in names {
+                    data.extend_from_slice(&name);
+                    data.push(0);
+                }
+                if size == 0 {
+                    reply.size(data.len() as u32);
+                } else if data.len() <= size as usize {
+                    reply.data(&data);
+                } else {
+                    reply.error(libc::ERANGE);
+                }
+            }
+            Err(error) => reply.error(error.errno()),
+        }
+    }
+    fn removexattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
+        empty(
+            reply,
+            self.fs
+                .set_xattr(ino, name.as_bytes(), None, XattrPolicy::Remove),
+        );
+    }
+    #[allow(clippy::unnecessary_cast)] // libc statvfs field types differ by platform.
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let path = match CString::new(self.fs.repository().path().as_os_str().as_bytes()) {
             Ok(p) => p,
@@ -444,11 +533,11 @@ impl Filesystem for XetFuse {
         }
         let s = unsafe { stats.assume_init() };
         reply.statfs(
-            s.f_blocks,
-            s.f_bfree,
-            s.f_bavail,
-            s.f_files,
-            s.f_ffree,
+            s.f_blocks as u64,
+            s.f_bfree as u64,
+            s.f_bavail as u64,
+            s.f_files as u64,
+            s.f_ffree as u64,
             s.f_frsize as u32,
             255,
             s.f_frsize as u32,

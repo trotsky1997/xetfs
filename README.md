@@ -1,6 +1,6 @@
 # XetFS
 
-Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及 macOS/Linux 均可使用的仓库 CLI 与 Rust 库。当前版本为 **0.1.0**。
+Rust 编写的本地内容寻址文件系统，提供 Linux FUSE、macOS macFUSE 和 Windows WinFsp 挂载，以及仓库 CLI 与 Rust 库。当前源码版本为 **0.2.0**。
 
 实现依据是 [Hugging Face Xet 概览](https://huggingface.co/docs/hub/en/xet/index)、[开放协议](https://huggingface.co/docs/xet/index)及其 Rust 参考实现。分块、块哈希、Merkle 哈希和 Xorb 块编码已经用固定版本的官方数据核对。
 
@@ -14,22 +14,30 @@ Rust 编写的本地内容寻址文件系统，提供 Linux FUSE 挂载，以及
 | 数据组织 | 不超过 64 MiB 的不可变 Xorb；文件保存块配方；`manifest` 展示合并后的 Xorb 范围 |
 | 文件操作 | 顺序与随机读写、追加、截断、零填充空洞、目录、重命名、硬链接、符号链接 |
 | 元数据 | inode、原始字节文件名、权限位、uid/gid、纳秒时间戳、链接数 |
+| 扩展属性 | 仓库 API 和实验性 macOS FSKit 支持，随快照保存与恢复 |
 | 版本与维护 | 命名快照、快照读取、整树恢复、标记清理、Xorb 压实、`fsck` |
 | Hub 远程传输 | 对接 Hugging Face Hub 与 Xet CAS；支持按范围读取、Linux 只读按需远程挂载、原生 Xorb/MDB 上传和 Hub commit，兼容路径由官方 Rust Xet 客户端处理 |
+| XetLink 跨云传输 | 导出原始压缩块和文件配方，支持 HTTPS 中继、缺块批传、断点续传与节点本地校验恢复；两端主动连接 |
 | S3 兼容入口 | 经 SigV4 认证提供桶/对象 CRUD、ListObjectsV2、Range GET 和分段上传；对象写入 XetFS 并参与去重 |
 | S3 对象后端 | 可将不可变 Xorb 对象写穿到 S3，并在本地对象缓存缺失时回源；SQLite 元数据仍留在本地仓库 |
 | 持久化 | SQLite WAL + FULL synchronous；对象先 fsync，再提交引用；仓库进程锁 |
 
+XetLink 的 `transfer export` / `transfer restore` 命令使用当前源码构建。
+
+XetLink 传输文件内容和权限位，时间、所有者与硬链接关系不包含在包中；源目录树含扩展属性时导出会拒绝执行。
+
 ## 构建与运行
 
-需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。仓库中的 ARM64 预编译二进制已从当前源码重建，包含下文的 Hub 远程命令。
+需要 Rust 1.95 或更新版本；本次验证使用 Rust 1.98。Hugging Face Xet 远程客户端依赖 `sysinfo 0.39`，其最低 Rust 版本为 1.95。`Cargo.lock` 已包含在源码中。
+
+当前仓库格式为 v4；旧版 v1、v2、v3 仓库需要对应旧版程序读取，当前版本不会自动迁移。
 
 ```sh
 cargo build --release --locked
 cargo test --locked --all-targets
 ```
 
-也可直接使用 `bin/xetfs-macos-arm64` 或 `bin/xetfs-linux-arm64`。macOS 二进制提供仓库命令；内核挂载当前支持 Linux。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
+仓库中的 `bin/` 保存历史 macOS/Linux 构建；当前功能请从源码构建。附带的 Linux 二进制使用 GNU libc，要求 glibc 2.34 及以上和 `libgcc_s.so.1`；其他 Linux 环境请从源码构建。macOS 二进制的最低部署版本为 macOS 11，实测环境为 macOS 26。
 
 以下示例创建独立仓库，导入本地文件并读取：
 
@@ -143,7 +151,7 @@ Linux 上的 `remote mount` 在启动时读取一次 revision 文件树，并直
 
 ## 挂载
 
-Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。`fuser` 使用 Rust 挂载实现，无需链接 libfuse 开发库。
+Linux 需要内核 FUSE、`/dev/fuse` 和 `fusermount3`（通常由发行版的 `fuse3` 包提供）。macOS 需要安装并启用 macFUSE 5，构建时需要其 libfuse 和 MFMount.framework。macOS 挂载使用 macFUSE 的 FSKit 后端。Windows 需要安装 WinFsp；构建需要其开发文件。
 
 ```sh
 mkdir ./mountpoint
@@ -153,10 +161,17 @@ $XETFS_BIN --repo ./demo.repo mount ./mountpoint
 此命令在前台运行。另一个终端可使用 `cp`、`cat`、`mv`、`ln`、Python 文件 API 等访问挂载目录。卸载：
 
 ```sh
-fusermount3 -u ./mountpoint
+fusermount3 -u ./mountpoint  # Linux
+umount ./mountpoint          # macOS
 ```
 
-挂载点必须为空，并与仓库目录分离。挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
+Windows 使用空闲盘符挂载，并通过 Ctrl+C 卸载：
+
+```powershell
+xetfs.exe --repo C:\path\to\repository mount X:
+```
+
+挂载点必须为空，并与仓库目录分离。Linux 挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
 
 ## 快照与回收
 
@@ -187,12 +202,29 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 实测包含：官方 CSV 的 796 个分块边界及块哈希、文件/Xorb/verification 哈希、官方 Xorb 解码后的完整字节比对、跨 Xorb 大文件读取、导入中断回滚、快照与 GC、真实内核挂载及 SIGKILL 后 fsync 数据恢复。性能基准对同一 128 MiB 数据集运行三次，记录优化前后的中位数；Hub 只读拉取也在固定公开 revision 上完成并核对 SHA-256。具体环境和指标见 [验证记录](verification/README.md)。
 
+## macOS 去重实测
+
+在 macFUSE FSKit 挂载点写入并逐份校验 4 份相同的 8 MiB 随机文件，逻辑总量为 32 MiB。数据对象增加 8,389,680 字节，仓库实际分配空间增加 9,834,496 字节（含元数据），按实际分配空间计算节省约 70.7%。测试使用不可压缩随机数据，数字取决于文件内容和仓库状态。
+
+## Linux GitHub Actions 实测
+
+在 GitHub Actions 的 Linux x86-64 runner 上使用 release 构建、FUSE 挂载和新仓库，写入 4 份相同的 8 MiB 随机数据并逐份校验。逻辑总量 32 MiB，仓库实际分配 8,658,944 字节（含元数据），节省约 74.2%。单次 8 MiB 写入并 fsync：首次 0.176 秒，后续三次 0.062–0.074 秒；单次读取 0.0059–0.0082 秒。这是一轮小样本测量，受缓存和 runner 环境影响。
+
+挂载验收覆盖随机读写、链接、重命名、重挂载和进程异常终止后的 fsync 恢复。原始报告见 [GitHub Actions 测量结果](verification/github-actions-42185397024/linux-dedup.json)及[挂载验收结果](verification/github-actions-42185397024/linux-acceptance.json)。
+
+## Windows GitHub Actions 实测
+
+Windows Server 2025 的 GitHub Actions runner 使用 WinFsp 2.0 和 release 构建完成实际挂载、4 份相同 8 MiB 随机文件的写入与逐份校验、卸载后重挂载读取及 `fsck`。逻辑总量为 32 MiB，数据对象占 8,389,640 字节，按数据对象大小节省约 75.0%。首次 8 MiB 写入并 fsync 耗时 0.178 秒，重复写入 0.058–0.064 秒，读取 0.018–0.021 秒；这些数字来自单次运行，受缓存和 runner 环境影响。原始结果见 [Windows 挂载测量](verification/github-actions-42187846276/windows-mount.json)。另一次 debug 构建的 NTFS 实际分配增量为 8,527,872 字节，节省约 74.6%；[原始结果](verification/github-actions-42190389107/windows-mount.json)包含目录创建、枚举和重命名检查。
+
+Windows ACL 与符号链接验收使用 Windows Server 2025、WinFsp 2.0 和 debug 构建，检查了 ACL 拒绝读取及重挂载后的权限、相对文件和目录符号链接、通过链接修改文件及重挂载读取。[原始结果](verification/github-actions-42555273668/windows-mount.json)记录了检查和去重数据。
+
 ## 当前边界
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
-- 挂载目前支持 Linux；macOS 已验证核心库与 CLI，尚未提供 macFUSE 挂载。
+- macOS macFUSE 挂载已在独立目录验证读写、重挂载和 `fsck`；macOS 系统对部分位置的挂载有权限限制。
+- Windows 卷持久化文件和目录 ACL，支持通过 WinFsp 创建和访问符号链接。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。
-- 当前使用直接 I/O 和串行 FUSE 回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。
+- Linux FUSE 使用直接 I/O 和串行回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。
 
 结构、提交顺序和格式约束见 [ARCHITECTURE.md](ARCHITECTURE.md)。代码采用 Apache-2.0；算法依据与测试数据来源见 [THIRD_PARTY.md](THIRD_PARTY.md)。

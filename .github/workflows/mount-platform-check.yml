@@ -1,0 +1,42 @@
+name: Mount platform check
+on:
+  push:
+    branches: [macos-fskit-support]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -qq && sudo apt-get install -y fuse3
+      - run: sudo modprobe fuse && test -c /dev/fuse && ls -l /dev/fuse
+      - run: cargo build --release --locked
+      - run: python3 scripts/mount_acceptance.py ./target/release/xetfs --report results/linux-acceptance.json
+      - run: python3 scripts/mount_dedup_benchmark.py ./target/release/xetfs --report results/linux-dedup.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-mount-results
+          path: results/
+          if-no-files-found: warn
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install WinFsp
+        run: choco install winfsp -y --version=2.0.23075
+      - name: Build Windows executable
+        run: cargo build --release --locked --no-default-features
+      - name: Mount, read/write, remount and measure deduplication
+        run: python scripts/windows_mount_acceptance.py target/release/xetfs.exe --report results/windows-mount.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-mount-results
+          path: results/

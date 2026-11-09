@@ -8,7 +8,6 @@ use std::{
     collections::{HashMap, VecDeque},
     ffi::OsStr,
     io::{Read, Seek, SeekFrom},
-    os::unix::{ffi::OsStrExt, fs::FileExt},
     path::Path,
 };
 
@@ -22,6 +21,30 @@ pub struct SetAttr {
     pub size: Option<u64>,
     pub atime_ns: Option<i64>,
     pub mtime_ns: Option<i64>,
+    pub birthtime_ns: Option<i64>,
+    pub flags: Option<u32>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum XattrPolicy {
+    Set,
+    Create,
+    Replace,
+    Remove,
+}
+
+#[cfg(target_os = "macos")]
+const NO_XATTR: i32 = libc::ENOATTR;
+#[cfg(not(target_os = "macos"))]
+const NO_XATTR: i32 = libc::ENODATA;
+
+fn xattr_name(name: &[u8]) -> Result<()> {
+    if name.is_empty() || name.contains(&0) {
+        return errno(libc::EINVAL);
+    }
+    if name.len() > 127 {
+        return errno(libc::ENAMETOOLONG);
+    }
+    Ok(())
 }
 struct Handle {
     ino: u64,
@@ -51,8 +74,109 @@ impl FileSystem {
             next_handle: 1,
         }
     }
+    pub fn preload_small_files(&mut self, files: &[Vec<u8>]) -> Result<()> {
+        self.repo.preload_small_files(files)
+    }
     pub fn repository(&self) -> &Repository {
         &self.repo
+    }
+    pub fn get_xattr(&self, ino: u64, name: &[u8]) -> Result<Vec<u8>> {
+        xattr_name(name)?;
+        self.node(ino)?;
+        self.repo
+            .conn
+            .query_row(
+                "SELECT value FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(Error::Errno(NO_XATTR))
+    }
+    pub fn list_xattrs(&self, ino: u64) -> Result<Vec<Vec<u8>>> {
+        self.node(ino)?;
+        Ok(self
+            .repo
+            .conn
+            .prepare("SELECT name FROM inode_xattrs WHERE ino=?1 ORDER BY name")?
+            .query_map([ino], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+    pub fn set_xattr(
+        &mut self,
+        ino: u64,
+        name: &[u8],
+        value: Option<&[u8]>,
+        policy: XattrPolicy,
+    ) -> Result<()> {
+        xattr_name(name)?;
+        if (policy == XattrPolicy::Remove) != value.is_none() {
+            return errno(libc::EINVAL);
+        }
+        self.node(ino)?;
+        let tx = self.repo.conn.transaction()?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists && policy == XattrPolicy::Create {
+            return errno(libc::EEXIST);
+        }
+        if !exists && matches!(policy, XattrPolicy::Replace | XattrPolicy::Remove) {
+            return errno(NO_XATTR);
+        }
+        if let Some(value) = value {
+            tx.execute("INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3) ON CONFLICT(ino,name) DO UPDATE SET value=excluded.value", params![ino, name, value])?;
+        } else {
+            tx.execute(
+                "DELETE FROM inode_xattrs WHERE ino=?1 AND name=?2",
+                params![ino, name],
+            )?;
+        }
+        tx.execute(
+            "UPDATE inodes SET ctime=?1 WHERE ino=?2",
+            params![now_ns(), ino],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Pin an already verified recipe without reading or rechunking its bytes.
+    pub fn pin_content(&mut self, path: impl AsRef<Path>, id: &str) -> Result<Node> {
+        let size: u64 =
+            self.repo
+                .conn
+                .query_row("SELECT size FROM contents WHERE id=?1", [id], |r| r.get(0))?;
+        if let Ok(existing) = self.resolve_nofollow(&path) {
+            if existing.kind != Kind::File || existing.content.as_deref() != Some(id) {
+                return Err(Error::Invalid(
+                    "immutable CAS path already has different content".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let (parent, name) = self.path_parent(path)?;
+        self.create_node(
+            parent,
+            &name,
+            Kind::File,
+            0o400,
+            crate::platform::owner().0,
+            crate::platform::owner().1,
+            Some(id),
+            size,
+            None,
+            None,
+            None,
+            0,
+            None,
+        )
+    }
+    pub(crate) fn cas_repository_mut(&mut self) -> &mut Repository {
+        &mut self.repo
     }
     pub fn retain_inode(&mut self, ino: u64, count: u64) {
         *self.pins.entry(ino).or_default() += count;
@@ -117,7 +241,7 @@ impl FileSystem {
     }
     pub fn lookup(&self, parent: u64, name: &OsStr) -> Result<Node> {
         self.directory(parent)?;
-        let name = name.as_bytes();
+        let name = name.as_encoded_bytes();
         if name == b"." {
             return self.node(parent);
         }
@@ -156,15 +280,15 @@ impl FileSystem {
             .collect()
     }
     pub fn resolve(&self, path: impl AsRef<Path>) -> Result<Node> {
-        self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), true, None)
+        self.resolve_bytes(path.as_ref().as_os_str().as_encoded_bytes(), true, None)
     }
     pub fn resolve_nofollow(&self, path: impl AsRef<Path>) -> Result<Node> {
-        self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), false, None)
+        self.resolve_bytes(path.as_ref().as_os_str().as_encoded_bytes(), false, None)
     }
     fn view_node(&self, ino: u64, snapshot: Option<&str>) -> Result<Node> {
         match snapshot {
             None => self.node(ino),
-            Some(s) => Ok(self.repo.conn.query_row("SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,content,target,1 FROM snapshot_nodes WHERE snapshot=?1 AND ino=?2",params![s,ino],Node::row).optional()?.ok_or(Error::Errno(libc::ENOENT))?),
+            Some(s) => Ok(self.repo.conn.query_row("SELECT ino,kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,flags,content,target,1 FROM snapshot_nodes WHERE snapshot=?1 AND ino=?2",params![s,ino],Node::row).optional()?.ok_or(Error::Errno(libc::ENOENT))?),
         }
     }
     fn resolve_bytes(
@@ -232,7 +356,7 @@ impl FileSystem {
         Ok(node)
     }
     pub fn path_parent(&self, path: impl AsRef<Path>) -> Result<(u64, Vec<u8>)> {
-        let bytes = path.as_ref().as_os_str().as_bytes();
+        let bytes = path.as_ref().as_os_str().as_encoded_bytes();
         let end = bytes
             .iter()
             .rposition(|b| *b != b'/')
@@ -263,10 +387,17 @@ impl FileSystem {
         content: Option<&str>,
         size: u64,
         target: Option<&[u8]>,
+        copy_xattrs: Option<u64>,
+        birthtime: Option<i64>,
+        flags: u32,
+        initial_xattr: Option<(&[u8], &[u8])>,
     ) -> Result<Node> {
         let dir = self.directory(parent)?;
         Self::name(name)?;
-        if self.lookup(parent, OsStr::from_bytes(name)).is_ok() {
+        if self
+            .lookup(parent, crate::platform::name_from_bytes(name)?)
+            .is_ok()
+        {
             return errno(libc::EEXIST);
         }
         let gid = if dir.mode & 0o2000 != 0 { dir.gid } else { gid };
@@ -278,12 +409,24 @@ impl FileSystem {
             };
         let tx = self.repo.conn.transaction()?;
         let now = now_ns();
-        tx.execute("INSERT INTO inodes(kind,mode,uid,gid,size,atime,mtime,ctime,content,target) VALUES (?1,?2,?3,?4,?5,?6,?6,?6,?7,?8)",params![kind as i64,mode,uid,gid,size,now,content,target])?;
+        tx.execute("INSERT INTO inodes(kind,mode,uid,gid,size,atime,mtime,ctime,birthtime,content,target,flags) VALUES (?1,?2,?3,?4,?5,?6,?6,?6,?7,?8,?9,?10)",params![kind as i64,mode,uid,gid,size,now,birthtime.unwrap_or(now),content,target,flags])?;
         let ino = tx.last_insert_rowid() as u64;
         tx.execute(
             "INSERT INTO entries VALUES (?1,?2,?3)",
             params![parent, name, ino],
         )?;
+        if let Some((name, value)) = initial_xattr {
+            tx.execute(
+                "INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3)",
+                params![ino, name, value],
+            )?;
+        }
+        if let Some(source) = copy_xattrs {
+            tx.execute(
+                "INSERT INTO inode_xattrs SELECT ?1,name,value FROM inode_xattrs WHERE ino=?2",
+                params![ino, source],
+            )?;
+        }
         tx.execute(
             "UPDATE inodes SET mtime=?1,ctime=?1 WHERE ino=?2",
             params![now, parent],
@@ -302,7 +445,7 @@ impl FileSystem {
         let (empty, _) = self.repo.ingest(std::io::empty())?;
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::File,
             mode,
             uid,
@@ -310,8 +453,108 @@ impl FileSystem {
             Some(&empty),
             0,
             None,
+            None,
+            None,
+            0,
+            None,
         )
     }
+    #[cfg(windows)]
+    pub(crate) fn create_windows(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        directory: bool,
+        security: &[u8],
+    ) -> Result<Node> {
+        let content = if directory {
+            None
+        } else {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        };
+        self.create_node(
+            parent,
+            name.as_encoded_bytes(),
+            if directory {
+                Kind::Directory
+            } else {
+                Kind::File
+            },
+            if directory { 0o755 } else { 0o644 },
+            0,
+            0,
+            content.as_deref(),
+            0,
+            None,
+            None,
+            None,
+            0,
+            Some((b"user.xetfs.windows.security", security)),
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn set_windows_symlink(
+        &mut self,
+        ino: u64,
+        target: &[u8],
+        raw: &[u8],
+    ) -> Result<()> {
+        let node = self.node(ino)?;
+        if target.is_empty()
+            || target.len() > 4096
+            || target.contains(&0)
+            || node.size != 0
+            || node.kind == Kind::Symlink
+        {
+            return errno(libc::EINVAL);
+        }
+        if self.stages.contains_key(&ino) {
+            return Err(Error::Busy);
+        }
+        if node.kind == Kind::Directory && !self.list(ino)?.is_empty() {
+            return errno(libc::ENOTEMPTY);
+        }
+        let mut value = vec![u8::from(node.kind == Kind::Directory)];
+        value.extend_from_slice(raw);
+        let tx = self.repo.conn.transaction()?;
+        tx.execute(
+            "UPDATE inodes SET kind=3,content=NULL,target=?1,size=?2,ctime=?3 WHERE ino=?4",
+            params![target, target.len(), now_ns(), ino],
+        )?;
+        tx.execute(
+            "INSERT INTO inode_xattrs(ino,name,value) VALUES(?1,?2,?3)",
+            params![ino, b"user.xetfs.windows.reparse".as_slice(), value],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn delete_windows_symlink(&mut self, ino: u64) -> Result<()> {
+        let node = self.node(ino)?;
+        if node.kind != Kind::Symlink {
+            return errno(libc::EINVAL);
+        }
+        let value = self.get_xattr(ino, b"user.xetfs.windows.reparse")?;
+        let directory = value.first() == Some(&1);
+        let content = if directory {
+            None
+        } else {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        };
+        let tx = self.repo.conn.transaction()?;
+        tx.execute(
+            "UPDATE inodes SET kind=?1,content=?2,target=NULL,size=0,ctime=?3 WHERE ino=?4",
+            params![if directory { 2 } else { 1 }, content, now_ns(), ino],
+        )?;
+        tx.execute(
+            "DELETE FROM inode_xattrs WHERE ino=?1 AND name=?2",
+            params![ino, b"user.xetfs.windows.reparse".as_slice()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn mkdir(
         &mut self,
         parent: u64,
@@ -322,13 +565,69 @@ impl FileSystem {
     ) -> Result<Node> {
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::Directory,
             mode,
             uid,
             gid,
             None,
             0,
+            None,
+            None,
+            None,
+            0,
+            None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_birthtime(
+        &mut self,
+        parent: u64,
+        name: &OsStr,
+        kind: Kind,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+        target: Option<&[u8]>,
+        birthtime: Option<i64>,
+        flags: u32,
+    ) -> Result<Node> {
+        if flags & !0x8000 != 0 {
+            return errno(libc::EOPNOTSUPP);
+        }
+        let empty = if kind == Kind::File {
+            Some(self.repo.ingest(std::io::empty())?.0)
+        } else {
+            None
+        };
+        let size = if kind == Kind::Symlink {
+            let target = target.ok_or(Error::Errno(libc::EINVAL))?;
+            if target.is_empty() || target.contains(&0) {
+                return errno(libc::EINVAL);
+            }
+            if target.len() > 4096 {
+                return errno(libc::ENAMETOOLONG);
+            }
+            target.len() as u64
+        } else {
+            if target.is_some() {
+                return errno(libc::EINVAL);
+            }
+            0
+        };
+        self.create_node(
+            parent,
+            name.as_encoded_bytes(),
+            kind,
+            mode,
+            uid,
+            gid,
+            empty.as_deref(),
+            size,
+            target,
+            None,
+            birthtime,
+            flags,
             None,
         )
     }
@@ -337,18 +636,20 @@ impl FileSystem {
         for name in path
             .as_ref()
             .as_os_str()
-            .as_bytes()
+            .as_encoded_bytes()
             .split(|b| *b == b'/')
             .filter(|n| !n.is_empty())
         {
-            let name = OsStr::from_bytes(name);
+            let name = crate::platform::name_from_bytes(name)?;
             let node = match self.lookup(ino, name) {
                 Ok(node) => node,
-                Err(Error::Errno(libc::ENOENT)) => {
-                    self.mkdir(ino, name, 0o755, unsafe { libc::getuid() }, unsafe {
-                        libc::getgid()
-                    })?
-                }
+                Err(Error::Errno(libc::ENOENT)) => self.mkdir(
+                    ino,
+                    name,
+                    0o755,
+                    crate::platform::owner().0,
+                    crate::platform::owner().1,
+                )?,
                 Err(e) => return Err(e),
             };
             if node.kind != Kind::Directory {
@@ -374,7 +675,7 @@ impl FileSystem {
         }
         self.create_node(
             parent,
-            name.as_bytes(),
+            name.as_encoded_bytes(),
             Kind::Symlink,
             0o777,
             uid,
@@ -382,6 +683,10 @@ impl FileSystem {
             None,
             target.len() as u64,
             Some(target),
+            None,
+            None,
+            0,
+            None,
         )
     }
     pub fn link(&mut self, ino: u64, parent: u64, name: &OsStr) -> Result<Node> {
@@ -390,7 +695,7 @@ impl FileSystem {
             return errno(libc::EPERM);
         }
         self.directory(parent)?;
-        Self::name(name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
         if self.lookup(parent, name).is_ok() {
             return errno(libc::EEXIST);
         }
@@ -398,7 +703,7 @@ impl FileSystem {
         let now = now_ns();
         tx.execute(
             "INSERT INTO entries VALUES (?1,?2,?3)",
-            params![parent, name.as_bytes(), ino],
+            params![parent, name.as_encoded_bytes(), ino],
         )?;
         tx.execute("UPDATE inodes SET ctime=?1 WHERE ino=?2", params![now, ino])?;
         tx.execute(
@@ -428,12 +733,12 @@ impl FileSystem {
         } else if node.kind == Kind::Directory {
             return errno(libc::EISDIR);
         }
-        Self::name(name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
         let tx = self.repo.conn.transaction()?;
         let now = now_ns();
         tx.execute(
             "DELETE FROM entries WHERE parent=?1 AND name=?2",
-            params![parent, name.as_bytes()],
+            params![parent, name.as_encoded_bytes()],
         )?;
         tx.execute(
             "UPDATE inodes SET ctime=?1 WHERE ino=?2",
@@ -454,8 +759,8 @@ impl FileSystem {
         new_name: &OsStr,
         no_replace: bool,
     ) -> Result<()> {
-        Self::name(name.as_bytes())?;
-        Self::name(new_name.as_bytes())?;
+        Self::name(name.as_encoded_bytes())?;
+        Self::name(new_name.as_encoded_bytes())?;
         let src = self.lookup(parent, name)?;
         self.directory(new_parent)?;
         let dest = match self.lookup(new_parent, new_name) {
@@ -496,11 +801,16 @@ impl FileSystem {
         let tx = self.repo.conn.transaction()?;
         tx.execute(
             "DELETE FROM entries WHERE parent=?1 AND name=?2",
-            params![new_parent, new_name.as_bytes()],
+            params![new_parent, new_name.as_encoded_bytes()],
         )?;
         tx.execute(
             "UPDATE entries SET parent=?1,name=?2 WHERE parent=?3 AND name=?4",
-            params![new_parent, new_name.as_bytes(), parent, name.as_bytes()],
+            params![
+                new_parent,
+                new_name.as_encoded_bytes(),
+                parent,
+                name.as_encoded_bytes()
+            ],
         )?;
         tx.execute(
             "UPDATE inodes SET ctime=?1 WHERE ino=?2",
@@ -531,7 +841,10 @@ impl FileSystem {
             if self.handles.values().any(|h| h.ino == n.ino) {
                 return Err(Error::Busy);
             }
-        } else if self.lookup(parent, OsStr::from_bytes(&name)).is_ok() {
+        } else if self
+            .lookup(parent, crate::platform::name_from_bytes(&name)?)
+            .is_ok()
+        {
             return errno(libc::EEXIST);
         }
         let (id, size) = self.repo.ingest(input)?;
@@ -547,10 +860,14 @@ impl FileSystem {
                 &name,
                 Kind::File,
                 0o644,
-                unsafe { libc::getuid() },
-                unsafe { libc::getgid() },
+                crate::platform::owner().0,
+                crate::platform::owner().1,
                 Some(&id),
                 size,
+                None,
+                None,
+                None,
+                0,
                 None,
             )
         }
@@ -568,10 +885,14 @@ impl FileSystem {
             &name,
             Kind::File,
             node.mode,
-            unsafe { libc::getuid() },
-            unsafe { libc::getgid() },
+            crate::platform::owner().0,
+            crate::platform::owner().1,
             node.content.as_deref(),
             node.size,
+            None,
+            Some(node.ino),
+            None,
+            node.flags,
             None,
         )
     }
@@ -609,7 +930,7 @@ impl FileSystem {
             });
         }
         if flags & libc::O_TRUNC != 0 {
-            if flags & libc::O_ACCMODE == libc::O_RDONLY {
+            if flags & crate::platform::ACCESS_MODE == libc::O_RDONLY {
                 return errno(libc::EACCES);
             }
             self.setattr(
@@ -639,7 +960,7 @@ impl FileSystem {
         let size = (node.size - offset).min(size as u64) as usize;
         if let Some(stage) = self.stages.get(&ino) {
             let mut data = vec![0; size];
-            stage.file.as_file().read_exact_at(&mut data, offset)?;
+            crate::platform::read_exact_at(stage.file.as_file(), &mut data, offset)?;
             Ok(data)
         } else {
             self.repo.read_content(
@@ -680,20 +1001,20 @@ impl FileSystem {
     }
     pub fn read_handle(&self, fh: u64, offset: u64, size: usize) -> Result<Vec<u8>> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;
-        if h.flags & libc::O_ACCMODE == libc::O_WRONLY {
+        if h.flags & crate::platform::ACCESS_MODE == libc::O_WRONLY {
             return errno(libc::EBADF);
         }
         self.read_inode(h.ino, offset, size)
     }
     pub fn write_handle(&mut self, fh: u64, offset: u64, data: &[u8]) -> Result<usize> {
         let h = self.handles.get(&fh).ok_or(Error::Errno(libc::EBADF))?;
-        if h.flags & libc::O_ACCMODE == libc::O_RDONLY {
+        if h.flags & crate::platform::ACCESS_MODE == libc::O_RDONLY {
             return errno(libc::EBADF);
         }
         let (ino, append, sync) = (
             h.ino,
             h.flags & libc::O_APPEND != 0,
-            h.flags & (libc::O_SYNC | libc::O_DSYNC) != 0,
+            h.flags & crate::platform::SYNC_FLAGS != 0,
         );
         if data.is_empty() {
             return Ok(0);
@@ -710,7 +1031,7 @@ impl FileSystem {
         {
             return errno(libc::EFBIG);
         }
-        let written = stage.file.as_file().write_at(data, offset)?;
+        let written = crate::platform::write_at(stage.file.as_file(), data, offset)?;
         if written == 0 {
             return Ok(0);
         }
@@ -764,6 +1085,9 @@ impl FileSystem {
         Ok(())
     }
     pub fn setattr(&mut self, ino: u64, attrs: SetAttr) -> Result<Node> {
+        if attrs.flags.is_some_and(|flags| flags & !0x8000 != 0) {
+            return errno(libc::EOPNOTSUPP);
+        }
         let node = self.node(ino)?;
         if let Some(size) = attrs.size {
             if node.kind != Kind::File {
@@ -790,7 +1114,7 @@ impl FileSystem {
         {
             stage.mtime = mtime;
         }
-        self.repo.conn.execute("UPDATE inodes SET mode=COALESCE(?1,mode),uid=COALESCE(?2,uid),gid=COALESCE(?3,gid),atime=COALESCE(?4,atime),mtime=COALESCE(?5,mtime),ctime=?6 WHERE ino=?7",params![attrs.mode.map(|m| m&0o7777),attrs.uid,attrs.gid,attrs.atime_ns,attrs.mtime_ns,now_ns(),ino])?;
+        self.repo.conn.execute("UPDATE inodes SET mode=COALESCE(?1,mode),uid=COALESCE(?2,uid),gid=COALESCE(?3,gid),atime=COALESCE(?4,atime),mtime=COALESCE(?5,mtime),birthtime=COALESCE(?6,birthtime),flags=COALESCE(?7,flags),ctime=?8 WHERE ino=?9",params![attrs.mode.map(|m| m&0o7777),attrs.uid,attrs.gid,attrs.atime_ns,attrs.mtime_ns,attrs.birthtime_ns,attrs.flags,now_ns(),ino])?;
         self.node(ino)
     }
     pub fn snapshot(&mut self, name: &str) -> Result<()> {
@@ -815,8 +1139,11 @@ impl FileSystem {
         offset: u64,
         size: usize,
     ) -> Result<Vec<u8>> {
-        let node =
-            self.resolve_bytes(path.as_ref().as_os_str().as_bytes(), true, Some(snapshot))?;
+        let node = self.resolve_bytes(
+            path.as_ref().as_os_str().as_encoded_bytes(),
+            true,
+            Some(snapshot),
+        )?;
         if node.kind != Kind::File {
             return errno(libc::EISDIR);
         }

@@ -1,4 +1,4 @@
-# XetFS 0.1 结构与存储约定
+# XetFS 0.2 结构与存储约定
 
 ## 从 Xet 到文件系统
 
@@ -56,6 +56,7 @@ flowchart LR
 | `s3_backend.rs` | AWS SDK S3 Xorb 对象后端、读穿本地缓存、校验回填及 S3 后端配置；所有凭证由 AWS SDK 凭证链提供 |
 | `remote_fuse.rs` | Linux 只读远程挂载：revision 文件树、Xet 文件 inode、固定窗口 LRU 与按需 CAS 范围读取 |
 | `fuse.rs` | Linux FUSE 回调、属性映射、稳定目录句柄与内核权限选项 |
+| `transfer.rs` | XetLink 不可变压缩块与文件配方导出、SHA-256/Xet 校验和节点本地重建；网络协议见 [XetLink](../halo-storage/XETLINK.md) |
 | `main.rs` | 管理、导入导出、范围读取、哈希、远程同步和挂载命令 |
 
 ## 算法对应关系
@@ -79,7 +80,7 @@ Linux `remote mount` 在启动时从 Hub `list_tree` 固定一个文件树视图
 ```text
 repo/
   LOCK                    进程生命周期的排他 advisory lock
-  metadata.sqlite         schema user_version = 1
+  metadata.sqlite         schema user_version = 4
   metadata.sqlite-wal     SQLite 自行管理
   metadata.sqlite-shm     SQLite 自行管理
   objects/<xet-hash>.xorb  已提交或待回收的不可变数据对象
@@ -87,6 +88,8 @@ repo/
 ```
 
 `schema.sql` 定义格式。`xorbs` 和 `xorb_chunks` 记录物理对象的完整目录；`chunks` 把唯一块哈希映射到一个物理位置。普通 GC 可删除块索引而保留部分使用的对象，完整物理目录仍允许 fsck 校验对象中所有记录。
+
+扩展属性保存在 `inode_xattrs`，随 inode 生命周期删除；快照通过 `snapshot_xattrs` 保存并恢复。复制文件在创建 inode 的同一事务中复制属性。格式 v4 增加 macOS 隐藏标志，拒绝打开 v1、v2、v3 仓库；升级前需保留原仓库及可用的旧版本程序。
 
 `contents` 保存不可变版本的 Xet 文件哈希和长度。`file_chunks` 保存顺序、逻辑偏移、长度与块哈希。配方独立于块的当前物理位置，压实只调整块索引。`reconstruction`/`manifest` 将连续的物理块合并成 `(xorb, [chunk_start, chunk_end))` terms，附带逻辑偏移、长度和 verification hash。
 
