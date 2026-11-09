@@ -60,3 +60,6 @@ winfsp_wrs_build = "=0.4.1"
 [profile.release]
 lto = "thin"
 strip = true
+
+[patch.crates-io]
+winfsp_wrs = { path = "vendor/winfsp_wrs" }

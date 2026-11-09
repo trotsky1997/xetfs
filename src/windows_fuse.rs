@@ -1,5 +1,5 @@
 //! Windows mount adapter over WinFsp.
-use crate::{Error, FileSystem, Kind, Node, SetAttr};
+use crate::{Error, FileSystem, Kind, Node, SetAttr, XattrPolicy};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -12,6 +12,10 @@ use winfsp_wrs::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_UNSUCCESSFUL, SecurityDescriptor, U16CStr, U16CString,
     VolumeInfo, VolumeParams, WriteMode, u16cstr, u16str,
 };
+
+const REPARSE_XATTR: &[u8] = b"user.xetfs.windows.reparse";
+const SYMLINK_TAG: u32 = 0xA000000C;
+const SECURITY_XATTR: &[u8] = b"user.xetfs.windows.security";
 
 struct Handle {
     ino: u64,
@@ -38,19 +42,82 @@ fn path(name: &U16CStr) -> Result<String, NTSTATUS> {
     let value = name.to_string().map_err(|_| STATUS_INVALID_PARAMETER)?;
     Ok(value.replace('\\', "/"))
 }
-fn attributes(node: &Node) -> FileAttributes {
+fn attributes(fs: &FileSystem, node: &Node) -> FileAttributes {
     match node.kind {
         Kind::Directory => FileAttributes::DIRECTORY,
+        Kind::Symlink => {
+            let directory = fs
+                .get_xattr(node.ino, REPARSE_XATTR)
+                .ok()
+                .is_some_and(|v| v.first() == Some(&1));
+            FileAttributes::REPARSE_POINT
+                | if directory {
+                    FileAttributes::DIRECTORY
+                } else {
+                    FileAttributes(0)
+                }
+        }
         _ => FileAttributes::NORMAL,
     }
+}
+fn link_target(buffer: &[u8]) -> Result<Vec<u8>, NTSTATUS> {
+    if buffer.len() < 20
+        || u32::from_le_bytes(buffer[0..4].try_into().unwrap()) != SYMLINK_TAG
+        || u16::from_le_bytes(buffer[4..6].try_into().unwrap()) as usize + 8 != buffer.len()
+    {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    let substitute_offset = u16::from_le_bytes(buffer[8..10].try_into().unwrap()) as usize;
+    let substitute_len = u16::from_le_bytes(buffer[10..12].try_into().unwrap()) as usize;
+    let print_offset = u16::from_le_bytes(buffer[12..14].try_into().unwrap()) as usize;
+    let print_len = u16::from_le_bytes(buffer[14..16].try_into().unwrap()) as usize;
+    let flags = u32::from_le_bytes(buffer[16..20].try_into().unwrap());
+    let valid_range = |offset: usize, len: usize| {
+        offset % 2 == 0
+            && len % 2 == 0
+            && 20usize
+                .checked_add(offset)
+                .and_then(|n| n.checked_add(len))
+                .is_some_and(|end| end <= buffer.len())
+    };
+    if buffer.len() > 16_384
+        || flags > 1
+        || substitute_len == 0
+        || !valid_range(substitute_offset, substitute_len)
+        || !valid_range(print_offset, print_len)
+    {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    let (offset, len) = if print_len == 0 {
+        (substitute_offset, substitute_len)
+    } else {
+        (print_offset, print_len)
+    };
+    let end = 20 + offset + len;
+    let units: Vec<u16> = buffer[20 + offset..end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let target = String::from_utf16(&units)
+        .map_err(|_| STATUS_INVALID_PARAMETER)?
+        .replace('\\', "/");
+    if target.contains('\0') {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
+    Ok(target.into_bytes())
 }
 fn time(ns: i64) -> u64 {
     (i128::from(ns) / 100 + 116_444_736_000_000_000).clamp(0, u64::MAX as i128) as u64
 }
-fn info(node: &Node) -> FileInfo {
+fn info(fs: &FileSystem, node: &Node) -> FileInfo {
     let mut result = FileInfo::default();
     result
-        .set_file_attributes(attributes(node))
+        .set_file_attributes(attributes(fs, node))
+        .set_reparse_tag(if node.kind == Kind::Symlink {
+            SYMLINK_TAG
+        } else {
+            0
+        })
         .set_file_size(node.size)
         .set_allocation_size(node.size.div_ceil(4096) * 4096)
         .set_creation_time(time(node.birthtime_ns))
@@ -62,6 +129,30 @@ fn info(node: &Node) -> FileInfo {
     result
 }
 impl Mount {
+    fn lookup(fs: &FileSystem, name: &U16CStr) -> Result<Node, NTSTATUS> {
+        let name = path(name)?;
+        let mut node = fs.node(1).map_err(status)?;
+        for part in name.split('/').filter(|part| !part.is_empty()) {
+            if node.kind != Kind::Directory {
+                return Err(STATUS_OBJECT_NAME_NOT_FOUND);
+            }
+            node = fs
+                .lookup(node.ino, std::ffi::OsStr::new(part))
+                .map_err(status)?;
+        }
+        Ok(node)
+    }
+    fn security_for(&self, fs: &FileSystem, ino: u64) -> Result<SecurityDescriptor, NTSTATUS> {
+        match fs.get_xattr(ino, SECURITY_XATTR) {
+            Ok(bytes) => {
+                let text = std::str::from_utf8(&bytes).map_err(|_| STATUS_UNSUCCESSFUL)?;
+                let text = U16CString::from_str(text).map_err(|_| STATUS_UNSUCCESSFUL)?;
+                SecurityDescriptor::from_wstr(&text).map_err(|_| STATUS_UNSUCCESSFUL)
+            }
+            Err(e) if e.errno() == libc::ENODATA => Ok(self.security.clone()),
+            Err(e) => Err(status(e)),
+        }
+    }
     fn open_node(fs: &mut FileSystem, node: Node) -> Result<(Arc<Handle>, FileInfo), NTSTATUS> {
         let file = if node.kind == Kind::File {
             Some(fs.open_handle(node.ino, libc::O_RDWR).map_err(status)?)
@@ -74,7 +165,7 @@ impl Mount {
                 ino: node.ino,
                 file,
             }),
-            info(&node),
+            info(fs, &node),
         ))
     }
 }
@@ -90,15 +181,51 @@ impl FileSystemInterface for Mount {
     fn get_security_by_name(
         &self,
         name: &U16CStr,
-        _: impl Fn() -> Option<FileAttributes>,
-    ) -> Result<(FileAttributes, PSecurityDescriptor, bool), NTSTATUS> {
-        let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let node = fs.resolve_nofollow(path(name)?).map_err(status)?;
-        Ok((attributes(&node), self.security.as_ptr(), false))
+        find_reparse: impl Fn() -> Option<FileAttributes>,
+    ) -> Result<(FileAttributes, SecurityDescriptor, bool), NTSTATUS> {
+        let found = {
+            let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+            match Self::lookup(&fs, name) {
+                Ok(node) => Ok((
+                    attributes(&fs, &node),
+                    self.security_for(&fs, node.ino)?,
+                    false,
+                )),
+                Err(e) => Err(e),
+            }
+        };
+        match found {
+            Ok(found) => Ok(found),
+            Err(e) => match find_reparse() {
+                Some(index) => Ok((index, self.security.clone(), true)),
+                None => Err(e),
+            },
+        }
     }
     const GET_SECURITY_DEFINED: bool = true;
-    fn get_security(&self, _: Self::FileContext) -> Result<PSecurityDescriptor, NTSTATUS> {
-        Ok(self.security.as_ptr())
+    fn get_security(&self, h: Self::FileContext) -> Result<SecurityDescriptor, NTSTATUS> {
+        let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        self.security_for(&fs, h.ino)
+    }
+    const SET_SECURITY_DEFINED: bool = true;
+    fn set_security(
+        &self,
+        h: Self::FileContext,
+        security_information: u32,
+        modification: PSecurityDescriptor,
+    ) -> Result<(), NTSTATUS> {
+        let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let updated = self
+            .security_for(&fs, h.ino)?
+            .set(security_information, modification)?;
+        let text = updated.to_sddl().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        fs.set_xattr(
+            h.ino,
+            SECURITY_XATTR,
+            Some(text.as_bytes()),
+            XattrPolicy::Set,
+        )
+        .map_err(status)
     }
     const OPEN_DEFINED: bool = true;
     fn open(
@@ -108,7 +235,7 @@ impl FileSystemInterface for Mount {
         _: FileAccessRights,
     ) -> Result<(Self::FileContext, FileInfo), NTSTATUS> {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let node = fs.resolve_nofollow(path(name)?).map_err(status)?;
+        let node = Self::lookup(&fs, name)?;
         Self::open_node(&mut fs, node)
     }
     const CREATE_DEFINED: bool = true;
@@ -116,21 +243,23 @@ impl FileSystemInterface for Mount {
         &self,
         name: &U16CStr,
         options: CreateFileInfo,
-        _: SecurityDescriptor,
+        security: SecurityDescriptor,
     ) -> Result<(Self::FileContext, FileInfo), NTSTATUS> {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let path = path(name)?;
         let (parent, name) = fs.path_parent(&path).map_err(status)?;
         let name = crate::platform::name_from_bytes(&name).map_err(status)?;
-        let node = if options
-            .create_options
-            .is(CreateOptions::FILE_DIRECTORY_FILE)
-        {
-            fs.mkdir(parent, name, 0o755, 0, 0)
-        } else {
-            fs.create(parent, name, 0o644, 0, 0)
-        }
-        .map_err(status)?;
+        let security = security.to_sddl().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let node = fs
+            .create_windows(
+                parent,
+                name,
+                options
+                    .create_options
+                    .is(CreateOptions::FILE_DIRECTORY_FILE),
+                security.as_bytes(),
+            )
+            .map_err(status)?;
         Self::open_node(&mut fs, node)
     }
     const CLOSE_DEFINED: bool = true;
@@ -149,7 +278,7 @@ impl FileSystemInterface for Mount {
     const GET_FILE_INFO_DEFINED: bool = true;
     fn get_file_info(&self, h: Self::FileContext) -> Result<FileInfo, NTSTATUS> {
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        Ok(info(&fs.node(h.ino).map_err(status)?))
+        Ok(info(&fs, &fs.node(h.ino).map_err(status)?))
     }
     const READ_DEFINED: bool = true;
     fn read(
@@ -188,7 +317,7 @@ impl FileSystemInterface for Mount {
         let n = fs
             .write_handle(h.file.ok_or(STATUS_ACCESS_DENIED)?, offset, &buffer[..len])
             .map_err(status)?;
-        Ok((n, info(&fs.node(h.ino).map_err(status)?)))
+        Ok((n, info(&fs, &fs.node(h.ino).map_err(status)?)))
     }
     const FLUSH_DEFINED: bool = true;
     fn flush(&self, h: Self::FileContext) -> Result<FileInfo, NTSTATUS> {
@@ -196,7 +325,7 @@ impl FileSystemInterface for Mount {
         if let Some(file) = h.file {
             fs.flush_handle(file).map_err(status)?;
         }
-        Ok(info(&fs.node(h.ino).map_err(status)?))
+        Ok(info(&fs, &fs.node(h.ino).map_err(status)?))
     }
     const SET_FILE_SIZE_DEFINED: bool = true;
     fn set_file_size(
@@ -208,16 +337,16 @@ impl FileSystemInterface for Mount {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let old = fs.node(h.ino).map_err(status)?;
         let size = if allocation { old.size.min(size) } else { size };
-        Ok(info(
-            &fs.setattr(
+        let node = fs
+            .setattr(
                 h.ino,
                 SetAttr {
                     size: Some(size),
                     ..Default::default()
                 },
             )
-            .map_err(status)?,
-        ))
+            .map_err(status)?;
+        Ok(info(&fs, &node))
     }
     const OVERWRITE_DEFINED: bool = true;
     fn overwrite(
@@ -249,11 +378,79 @@ impl FileSystemInterface for Mount {
                 continue;
             }
             let name = U16CString::from_str(name).map_err(|_| STATUS_INVALID_PARAMETER)?;
-            if !add(DirInfo::new(info(&entry.node), &name)) {
+            if !add(DirInfo::new(info(&fs, &entry.node), &name)) {
                 break;
             }
         }
         Ok(())
+    }
+    const RESOLVE_REPARSE_POINTS_DEFINED: bool = true;
+    const GET_REPARSE_POINT_DEFINED: bool = true;
+    fn get_reparse_point(
+        &self,
+        h: Self::FileContext,
+        _: &U16CStr,
+        buffer: &mut [u8],
+    ) -> Result<usize, NTSTATUS> {
+        let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let value = fs.get_xattr(h.ino, REPARSE_XATTR).map_err(status)?;
+        let raw = value.get(1..).ok_or(STATUS_INVALID_PARAMETER)?;
+        if buffer.len() < raw.len() {
+            return Err(winfsp_wrs::STATUS_BUFFER_TOO_SMALL);
+        }
+        buffer[..raw.len()].copy_from_slice(raw);
+        Ok(raw.len())
+    }
+    fn get_reparse_point_by_name(
+        &self,
+        name: &U16CStr,
+        _: bool,
+        buffer: Option<&mut [u8]>,
+    ) -> Result<usize, NTSTATUS> {
+        let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        let node = Self::lookup(&fs, name)?;
+        if node.kind != Kind::Symlink {
+            return Err(winfsp_wrs::STATUS_NOT_A_REPARSE_POINT);
+        }
+        let value = fs.get_xattr(node.ino, REPARSE_XATTR).map_err(status)?;
+        let raw = value.get(1..).ok_or(STATUS_INVALID_PARAMETER)?;
+        if let Some(buffer) = buffer {
+            if buffer.len() < raw.len() {
+                return Err(winfsp_wrs::STATUS_BUFFER_TOO_SMALL);
+            }
+            buffer[..raw.len()].copy_from_slice(raw);
+        }
+        Ok(raw.len())
+    }
+    const SET_REPARSE_POINT_DEFINED: bool = true;
+    fn set_reparse_point(
+        &self,
+        h: Self::FileContext,
+        _: &U16CStr,
+        buffer: &mut [u8],
+    ) -> Result<(), NTSTATUS> {
+        let target = link_target(buffer)?;
+        for unit in buffer[20..].chunks_exact_mut(2) {
+            if unit == [b'/', 0] {
+                unit[0] = b'\\';
+            }
+        }
+        let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        fs.set_windows_symlink(h.ino, &target, buffer)
+            .map_err(status)
+    }
+    const DELETE_REPARSE_POINT_DEFINED: bool = true;
+    fn delete_reparse_point(
+        &self,
+        h: Self::FileContext,
+        _: &U16CStr,
+        buffer: &mut [u8],
+    ) -> Result<(), NTSTATUS> {
+        if buffer.len() < 8 || u32::from_le_bytes(buffer[0..4].try_into().unwrap()) != SYMLINK_TAG {
+            return Err(STATUS_INVALID_PARAMETER);
+        }
+        let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
+        fs.delete_windows_symlink(h.ino).map_err(status)
     }
     const CAN_DELETE_DEFINED: bool = true;
     fn can_delete(&self, h: Self::FileContext, _: &U16CStr) -> Result<(), NTSTATUS> {
@@ -336,6 +533,9 @@ pub fn mount(fs: FileSystem, mountpoint: &Path) -> anyhow::Result<()> {
         .set_case_sensitive_search(true)
         .set_case_preserved_names(true)
         .set_unicode_on_disk(true)
+        .set_persistent_acls(true)
+        .set_reparse_point(true)
+        .set_reparse_point_access_check(true)
         .set_file_info_timeout(0)
         .set_file_system_name(u16cstr!("XetFS"))
         .map_err(|e| anyhow::anyhow!("volume name: {e:?}"))?;

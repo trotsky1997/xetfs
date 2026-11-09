@@ -216,11 +216,13 @@ python3 scripts/mount_acceptance.py ./target/release/xetfs  # Linux，实际挂�
 
 Windows Server 2025 的 GitHub Actions runner 使用 WinFsp 2.0 和 release 构建完成实际挂载、4 份相同 8 MiB 随机文件的写入与逐份校验、卸载后重挂载读取及 `fsck`。逻辑总量为 32 MiB，数据对象占 8,389,640 字节，按数据对象大小节省约 75.0%。首次 8 MiB 写入并 fsync 耗时 0.178 秒，重复写入 0.058–0.064 秒，读取 0.018–0.021 秒；这些数字来自单次运行，受缓存和 runner 环境影响。原始结果见 [Windows 挂载测量](verification/github-actions-42187846276/windows-mount.json)。另一次 debug 构建的 NTFS 实际分配增量为 8,527,872 字节，节省约 74.6%；[原始结果](verification/github-actions-42190389107/windows-mount.json)包含目录创建、枚举和重命名检查。
 
+Windows ACL 与符号链接验收使用 Windows Server 2025、WinFsp 2.0 和 debug 构建，检查了 ACL 拒绝读取及重挂载后的权限、相对文件和目录符号链接、通过链接修改文件及重挂载读取。[原始结果](verification/github-actions-42555273668/windows-mount.json)记录了检查和去重数据。
+
 ## 当前边界
 
 - `remote mount` 当前只读，启动时枚举文件树，只展示 Xet 存储的常规文件；不提供远程写入、分支更新监视、双向变更检测或删除镜像。`remote pull` 会在宿主机临时目录暂存下载文件；`remote push` 直接重读本地 CAS/文件暂存数据，不再额外占用一份完整文件的临时空间。
 - macOS macFUSE 挂载已在独立目录验证读写、重挂载和 `fsck`；macOS 系统对部分位置的挂载有权限限制。
-- Windows 卷使用启动用户和 SYSTEM 的统一访问控制；Windows ACL 修改和符号链接操作暂不提供。
+- Windows 卷持久化文件和目录 ACL，支持通过 WinFsp 创建和访问符号链接。
 - 可写文件首次修改会在磁盘建立完整暂存文件；flush/fsync/最后关闭时流式重分块整个文件。数据对象会去重，但提交计算仍为 O(文件大小)，暂存空间也可能接近文件大小。
 - 文件数据缓冲限制在一个 Xorb 和少量 chunk，配方及本次导入的块集合占用 O(块数) 内存。
 - Linux FUSE 使用直接 I/O 和串行回调；尚未提供 mmap、xattr/ACL、POSIX 文件锁、配额、特殊设备节点、分布式多写者与跨机器同步。读取不自动更新时间戳。

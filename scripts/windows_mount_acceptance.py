@@ -2,6 +2,7 @@
 """Mount an isolated WinFsp volume, verify durable read/write and deduplication."""
 import argparse
 import ctypes
+import csv
 from ctypes import wintypes
 import msvcrt
 import hashlib
@@ -93,6 +94,33 @@ def main():
                 assert hashlib.sha256((folder / 'renamed').read_bytes()).digest() == digest
                 (folder / 'renamed').rename(root / 'copy-3')
                 folder.rmdir()
+                (root / 'links').mkdir()
+                os.symlink('../copy-0', root / 'links' / 'file-link')
+                os.symlink('links', root / 'dir-link', target_is_directory=True)
+                assert (root / 'links' / 'file-link').read_bytes() == data
+                with (root / 'links' / 'file-link').open('r+b') as linked:
+                    assert linked.write(bytes([data[0] ^ 0xff])) == 1
+                    linked.flush(); os.fsync(linked.fileno())
+                    linked.seek(0); assert linked.read(1) == bytes([data[0] ^ 0xff])
+                    linked.seek(0); assert linked.write(data[:1]) == 1
+                    linked.flush(); os.fsync(linked.fileno())
+                assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
+                acl_file = root / 'copy-0'
+                subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
+                acl_before = subprocess.check_output(['icacls', str(acl_file)], text=True)
+                assert 'DENY' in acl_before
+                sid = next(csv.reader(subprocess.check_output(
+                    ['whoami', '/user', '/fo', 'csv', '/nh'], text=True).splitlines()))[1]
+                blocked = root / 'copy-1'
+                subprocess.run(['icacls', str(blocked), '/deny', f'*{sid}:(R)'], check=True, capture_output=True)
+                try:
+                    blocked.read_bytes()
+                    raise AssertionError('ACL did not deny read access')
+                except PermissionError:
+                    pass
+                subprocess.run(['icacls', str(blocked), '/remove:d', f'*{sid}'], check=True, capture_output=True)
+                assert hashlib.sha256(blocked.read_bytes()).digest() == digest
                 stop(proc); proc = None
                 stats = cli('stats'); fsck = cli('fsck')
                 allocation = allocated_bytes(repo) - initial_allocation
@@ -101,13 +129,23 @@ def main():
                 proc = start()
                 for i in range(4):
                     assert hashlib.sha256((root / f'copy-{i}').read_bytes()).digest() == digest
+                assert (root / 'links' / 'file-link').read_bytes() == data
+                assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
+                acl_after = subprocess.check_output(['icacls', str(root / 'copy-0')], text=True)
+                assert 'DENY' in acl_after
+                (root / 'links' / 'file-link').unlink()
+                (root / 'dir-link').rmdir()
+                (root / 'links').rmdir()
                 stop(proc); proc = None
                 result = {'status':'passed','platform':'windows-winfsp','system':platform.platform(),'copies':4,
                     'bytes_per_file':len(data),'logical_bytes':4*len(data),'xorb_bytes':stats['xorb_bytes'],
                     'data_savings_fraction':1-stats['xorb_bytes']/(4*len(data)),
                     'repository_allocated_increase_bytes':allocation,
                     'repository_savings_fraction':1-allocation/(4*len(data)),
-                    'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck}
+                    'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck,
+                    'acl_deny_read_enforced':True,'acl_persisted_after_remount':True,
+                    'relative_file_and_directory_symlinks':True,'symlink_write_and_remount':True}
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2)+'\n')
                 print(json.dumps(result, indent=2))
