@@ -79,6 +79,9 @@ fn reparse_data(fs: &FileSystem, node: &Node, name: &U16CStr) -> Result<Vec<u8>,
     }
     let target = std::str::from_utf8(node.target.as_deref().ok_or(STATUS_INVALID_PARAMETER)?)
         .map_err(|_| STATUS_INVALID_PARAMETER)?;
+    if target.contains('\\') {
+        return Err(STATUS_INVALID_PARAMETER);
+    }
     let target = if target.starts_with('/') {
         let name = path(name)?;
         let depth = name
