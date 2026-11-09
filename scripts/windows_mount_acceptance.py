@@ -99,7 +99,10 @@ def main():
                 os.symlink('links', root / 'dir-link', target_is_directory=True)
                 assert (root / 'links' / 'file-link').read_bytes() == data
                 with (root / 'links' / 'file-link').open('r+b') as linked:
-                    assert linked.write(data[:1]) == 1
+                    assert linked.write(bytes([data[0] ^ 0xff])) == 1
+                    linked.flush(); os.fsync(linked.fileno())
+                    linked.seek(0); assert linked.read(1) == bytes([data[0] ^ 0xff])
+                    linked.seek(0); assert linked.write(data[:1]) == 1
                     linked.flush(); os.fsync(linked.fileno())
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
                 assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
