@@ -20,6 +20,7 @@ const SECURITY_XATTR: &[u8] = b"user.xetfs.windows.security";
 struct Handle {
     ino: u64,
     file: Option<u64>,
+    parent: u64,
 }
 struct Mount {
     fs: Mutex<FileSystem>,
@@ -42,14 +43,19 @@ fn path(name: &U16CStr) -> Result<String, NTSTATUS> {
     let value = name.to_string().map_err(|_| STATUS_INVALID_PARAMETER)?;
     Ok(value.replace('\\', "/"))
 }
-fn attributes(fs: &FileSystem, node: &Node) -> FileAttributes {
+fn attributes(fs: &FileSystem, node: &Node, parent: u64) -> FileAttributes {
     match node.kind {
         Kind::Directory => FileAttributes::DIRECTORY,
         Kind::Symlink => {
-            let directory = fs
-                .get_xattr(node.ino, REPARSE_XATTR)
-                .ok()
-                .is_some_and(|v| v.first() == Some(&1));
+            let directory = match fs.get_xattr(node.ino, REPARSE_XATTR) {
+                Ok(v) => v.first() == Some(&1),
+                Err(e) if e.errno() == libc::ENODATA => node
+                    .target
+                    .as_deref()
+                    .and_then(|target| fs.resolve_from(parent, target).ok())
+                    .is_some_and(|target| target.kind == Kind::Directory),
+                Err(_) => false,
+            };
             FileAttributes::REPARSE_POINT
                 | if directory {
                     FileAttributes::DIRECTORY
@@ -59,6 +65,55 @@ fn attributes(fs: &FileSystem, node: &Node) -> FileAttributes {
         }
         _ => FileAttributes::NORMAL,
     }
+}
+fn reparse_data(fs: &FileSystem, node: &Node, name: &U16CStr) -> Result<Vec<u8>, NTSTATUS> {
+    match fs.get_xattr(node.ino, REPARSE_XATTR) {
+        Ok(value) => {
+            return value
+                .get(1..)
+                .map(|raw| raw.to_vec())
+                .ok_or(STATUS_INVALID_PARAMETER);
+        }
+        Err(e) if e.errno() == libc::ENODATA => {}
+        Err(e) => return Err(status(e)),
+    }
+    let target = std::str::from_utf8(node.target.as_deref().ok_or(STATUS_INVALID_PARAMETER)?)
+        .map_err(|_| STATUS_INVALID_PARAMETER)?;
+    let target = if target.starts_with('/') {
+        let name = path(name)?;
+        let depth = name
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .count()
+            .saturating_sub(1);
+        let mut relative = "../".repeat(depth);
+        relative.push_str(target.trim_start_matches('/'));
+        if relative.is_empty() {
+            relative.push('.');
+        }
+        relative
+    } else {
+        target.to_owned()
+    };
+    let target: Vec<u16> = target.replace('/', "\\").encode_utf16().collect();
+    let bytes = target
+        .len()
+        .checked_mul(2)
+        .filter(|n| *n <= 16_364)
+        .ok_or(STATUS_INVALID_PARAMETER)?;
+    let mut raw = Vec::with_capacity(20 + bytes);
+    raw.extend_from_slice(&SYMLINK_TAG.to_le_bytes());
+    raw.extend_from_slice(&((12 + bytes) as u16).to_le_bytes());
+    raw.extend_from_slice(&0u16.to_le_bytes());
+    raw.extend_from_slice(&0u16.to_le_bytes());
+    raw.extend_from_slice(&(bytes as u16).to_le_bytes());
+    raw.extend_from_slice(&0u16.to_le_bytes());
+    raw.extend_from_slice(&(bytes as u16).to_le_bytes());
+    raw.extend_from_slice(&1u32.to_le_bytes());
+    for unit in target {
+        raw.extend_from_slice(&unit.to_le_bytes());
+    }
+    Ok(raw)
 }
 fn link_target(buffer: &[u8]) -> Result<Vec<u8>, NTSTATUS> {
     if buffer.len() < 20
@@ -109,10 +164,10 @@ fn link_target(buffer: &[u8]) -> Result<Vec<u8>, NTSTATUS> {
 fn time(ns: i64) -> u64 {
     (i128::from(ns) / 100 + 116_444_736_000_000_000).clamp(0, u64::MAX as i128) as u64
 }
-fn info(fs: &FileSystem, node: &Node) -> FileInfo {
+fn info(fs: &FileSystem, node: &Node, parent: u64) -> FileInfo {
     let mut result = FileInfo::default();
     result
-        .set_file_attributes(attributes(fs, node))
+        .set_file_attributes(attributes(fs, node, parent))
         .set_reparse_tag(if node.kind == Kind::Symlink {
             SYMLINK_TAG
         } else {
@@ -153,7 +208,11 @@ impl Mount {
             Err(e) => Err(status(e)),
         }
     }
-    fn open_node(fs: &mut FileSystem, node: Node) -> Result<(Arc<Handle>, FileInfo), NTSTATUS> {
+    fn open_node(
+        fs: &mut FileSystem,
+        node: Node,
+        parent: u64,
+    ) -> Result<(Arc<Handle>, FileInfo), NTSTATUS> {
         let file = if node.kind == Kind::File {
             Some(fs.open_handle(node.ino, libc::O_RDWR).map_err(status)?)
         } else {
@@ -164,8 +223,9 @@ impl Mount {
             Arc::new(Handle {
                 ino: node.ino,
                 file,
+                parent,
             }),
-            info(fs, &node),
+            info(fs, &node, parent),
         ))
     }
 }
@@ -186,11 +246,18 @@ impl FileSystemInterface for Mount {
         let found = {
             let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
             match Self::lookup(&fs, name) {
-                Ok(node) => Ok((
-                    attributes(&fs, &node),
-                    self.security_for(&fs, node.ino)?,
-                    false,
-                )),
+                Ok(node) => {
+                    let parent = if node.ino == 1 {
+                        1
+                    } else {
+                        fs.path_parent(path(name)?).map_err(status)?.0
+                    };
+                    Ok((
+                        attributes(&fs, &node, parent),
+                        self.security_for(&fs, node.ino)?,
+                        false,
+                    ))
+                }
                 Err(e) => Err(e),
             }
         };
@@ -236,7 +303,12 @@ impl FileSystemInterface for Mount {
     ) -> Result<(Self::FileContext, FileInfo), NTSTATUS> {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let node = Self::lookup(&fs, name)?;
-        Self::open_node(&mut fs, node)
+        let parent = if node.ino == 1 {
+            1
+        } else {
+            fs.path_parent(path(name)?).map_err(status)?.0
+        };
+        Self::open_node(&mut fs, node, parent)
     }
     const CREATE_DEFINED: bool = true;
     fn create(
@@ -260,7 +332,7 @@ impl FileSystemInterface for Mount {
                 security.as_bytes(),
             )
             .map_err(status)?;
-        Self::open_node(&mut fs, node)
+        Self::open_node(&mut fs, node, parent)
     }
     const CLOSE_DEFINED: bool = true;
     fn close(&self, h: Self::FileContext) {
@@ -278,7 +350,7 @@ impl FileSystemInterface for Mount {
     const GET_FILE_INFO_DEFINED: bool = true;
     fn get_file_info(&self, h: Self::FileContext) -> Result<FileInfo, NTSTATUS> {
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        Ok(info(&fs, &fs.node(h.ino).map_err(status)?))
+        Ok(info(&fs, &fs.node(h.ino).map_err(status)?, h.parent))
     }
     const READ_DEFINED: bool = true;
     fn read(
@@ -317,7 +389,7 @@ impl FileSystemInterface for Mount {
         let n = fs
             .write_handle(h.file.ok_or(STATUS_ACCESS_DENIED)?, offset, &buffer[..len])
             .map_err(status)?;
-        Ok((n, info(&fs, &fs.node(h.ino).map_err(status)?)))
+        Ok((n, info(&fs, &fs.node(h.ino).map_err(status)?, h.parent)))
     }
     const FLUSH_DEFINED: bool = true;
     fn flush(&self, h: Self::FileContext) -> Result<FileInfo, NTSTATUS> {
@@ -325,7 +397,7 @@ impl FileSystemInterface for Mount {
         if let Some(file) = h.file {
             fs.flush_handle(file).map_err(status)?;
         }
-        Ok(info(&fs, &fs.node(h.ino).map_err(status)?))
+        Ok(info(&fs, &fs.node(h.ino).map_err(status)?, h.parent))
     }
     const SET_FILE_SIZE_DEFINED: bool = true;
     fn set_file_size(
@@ -346,7 +418,7 @@ impl FileSystemInterface for Mount {
                 },
             )
             .map_err(status)?;
-        Ok(info(&fs, &node))
+        Ok(info(&fs, &node, h.parent))
     }
     const OVERWRITE_DEFINED: bool = true;
     fn overwrite(
@@ -378,7 +450,7 @@ impl FileSystemInterface for Mount {
                 continue;
             }
             let name = U16CString::from_str(name).map_err(|_| STATUS_INVALID_PARAMETER)?;
-            if !add(DirInfo::new(info(&fs, &entry.node), &name)) {
+            if !add(DirInfo::new(info(&fs, &entry.node, h.ino), &name)) {
                 break;
             }
         }
@@ -389,16 +461,15 @@ impl FileSystemInterface for Mount {
     fn get_reparse_point(
         &self,
         h: Self::FileContext,
-        _: &U16CStr,
+        name: &U16CStr,
         buffer: &mut [u8],
     ) -> Result<usize, NTSTATUS> {
         let fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
-        let value = fs.get_xattr(h.ino, REPARSE_XATTR).map_err(status)?;
-        let raw = value.get(1..).ok_or(STATUS_INVALID_PARAMETER)?;
+        let raw = reparse_data(&fs, &fs.node(h.ino).map_err(status)?, name)?;
         if buffer.len() < raw.len() {
             return Err(winfsp_wrs::STATUS_BUFFER_TOO_SMALL);
         }
-        buffer[..raw.len()].copy_from_slice(raw);
+        buffer[..raw.len()].copy_from_slice(&raw);
         Ok(raw.len())
     }
     fn get_reparse_point_by_name(
@@ -412,13 +483,12 @@ impl FileSystemInterface for Mount {
         if node.kind != Kind::Symlink {
             return Err(winfsp_wrs::STATUS_NOT_A_REPARSE_POINT);
         }
-        let value = fs.get_xattr(node.ino, REPARSE_XATTR).map_err(status)?;
-        let raw = value.get(1..).ok_or(STATUS_INVALID_PARAMETER)?;
+        let raw = reparse_data(&fs, &node, name)?;
         if let Some(buffer) = buffer {
             if buffer.len() < raw.len() {
                 return Err(winfsp_wrs::STATUS_BUFFER_TOO_SMALL);
             }
-            buffer[..raw.len()].copy_from_slice(raw);
+            buffer[..raw.len()].copy_from_slice(&raw);
         }
         Ok(raw.len())
     }

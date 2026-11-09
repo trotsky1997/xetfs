@@ -15,6 +15,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import zipfile
 
 
 def allocated_bytes(root):
@@ -53,6 +54,9 @@ def main():
         def cli(*argv):
             return json.loads(subprocess.check_output([binary, '--repo', str(repo), *map(str, argv)]))
         cli('init')
+        # Fixture was created with XetFS on macOS before the Windows mount.
+        with zipfile.ZipFile(Path(__file__).resolve().parent.parent / 'tests/fixtures/unix-symlinks.zip') as fixture:
+            fixture.extractall(repo)
         initial_allocation = allocated_bytes(repo)
         with open(Path(temp) / 'mount.log', 'w+') as log:
             def start():
@@ -105,6 +109,18 @@ def main():
                     linked.seek(0); assert linked.write(data[:1]) == 1
                     linked.flush(); os.fsync(linked.fileno())
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert (root / 'unix-links' / 'relative').read_bytes() == data
+                assert (root / 'unix-links' / 'absolute').read_bytes() == data
+                with (root / 'unix-links' / 'relative').open('r+b') as linked:
+                    assert linked.write(bytes([data[0] ^ 0xff])) == 1
+                    linked.flush(); os.fsync(linked.fileno())
+                    assert (root / 'unix-links' / 'absolute').read_bytes()[0] == data[0] ^ 0xff
+                    linked.seek(0); assert linked.write(data[:1]) == 1
+                    linked.flush(); os.fsync(linked.fileno())
+                assert (root / 'unix-links' / 'directory').is_dir()
+                assert (root / 'unix-links' / 'directory' / 'file-link').read_bytes() == data
+                assert os.path.islink(root / 'unix-links' / 'dangling')
+                assert not (root / 'unix-links' / 'dangling').exists()
                 assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
                 acl_file = root / 'copy-0'
                 subprocess.run(['icacls', str(acl_file), '/deny', '*S-1-5-32-546:(R)'], check=True, capture_output=True)
@@ -131,6 +147,12 @@ def main():
                     assert hashlib.sha256((root / f'copy-{i}').read_bytes()).digest() == digest
                 assert (root / 'links' / 'file-link').read_bytes() == data
                 assert (root / 'dir-link' / 'file-link').read_bytes() == data
+                assert (root / 'unix-links' / 'relative').read_bytes() == data
+                assert (root / 'unix-links' / 'absolute').read_bytes() == data
+                assert (root / 'unix-links' / 'directory').is_dir()
+                assert (root / 'unix-links' / 'directory' / 'file-link').read_bytes() == data
+                assert os.path.islink(root / 'unix-links' / 'dangling')
+                assert not (root / 'unix-links' / 'dangling').exists()
                 assert os.readlink(root / 'links' / 'file-link').replace('\\', '/') == '../copy-0'
                 acl_after = subprocess.check_output(['icacls', str(root / 'copy-0')], text=True)
                 assert 'DENY' in acl_after
@@ -145,7 +167,8 @@ def main():
                     'repository_savings_fraction':1-allocation/(4*len(data)),
                     'write_fsync_seconds':writes,'read_seconds':reads,'sha256':digest.hex(),'fsck':fsck,
                     'acl_deny_read_enforced':True,'acl_persisted_after_remount':True,
-                    'relative_file_and_directory_symlinks':True,'symlink_write_and_remount':True}
+                    'relative_file_and_directory_symlinks':True,'symlink_write_and_remount':True,
+                    'unix_created_relative_absolute_directory_dangling_links':True}
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2)+'\n')
                 print(json.dumps(result, indent=2))
