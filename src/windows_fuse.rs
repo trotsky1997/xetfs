@@ -412,6 +412,9 @@ impl FileSystemInterface for Mount {
         let mut fs = self.fs.lock().map_err(|_| STATUS_UNSUCCESSFUL)?;
         let old = fs.node(h.ino).map_err(status)?;
         let size = if allocation { old.size.min(size) } else { size };
+        if size == old.size {
+            return Ok(info(&fs, &old, h.parent));
+        }
         let node = fs
             .setattr(
                 h.ino,

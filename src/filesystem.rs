@@ -52,6 +52,7 @@ struct Handle {
 }
 struct Stage {
     file: tempfile::NamedTempFile,
+    size: u64,
     dirty: bool,
     mtime: i64,
 }
@@ -198,7 +199,7 @@ impl FileSystem {
             .optional()?
             .ok_or(Error::Errno(libc::ENOENT))?;
         if let Some(stage) = self.stages.get(&ino) {
-            node.size = stage.file.as_file().metadata()?.len();
+            node.size = stage.size;
             node.mtime_ns = stage.mtime;
         }
         Ok(node)
@@ -926,6 +927,7 @@ impl FileSystem {
                 ino,
                 Stage {
                     file,
+                    size: node.size,
                     dirty: false,
                     mtime: node.mtime_ns,
                 },
@@ -1032,12 +1034,9 @@ impl FileSystem {
         if data.is_empty() {
             return Ok(0);
         }
+        let clear_privileges = self.node(ino)?.mode & 0o6000 != 0;
         let stage = self.ensure_stage(ino)?;
-        let offset = if append {
-            stage.file.as_file().metadata()?.len()
-        } else {
-            offset
-        };
+        let offset = if append { stage.size } else { offset };
         if offset
             .checked_add(data.len() as u64)
             .is_none_or(|n| n > i64::MAX as u64)
@@ -1049,11 +1048,14 @@ impl FileSystem {
             return Ok(0);
         }
         stage.dirty = true;
+        stage.size = stage.size.max(offset + written as u64);
         stage.mtime = now_ns();
-        self.repo.conn.execute(
-            "UPDATE inodes SET mode=mode&?1 WHERE ino=?2",
-            params![0o1777, ino],
-        )?;
+        if clear_privileges {
+            self.repo.conn.execute(
+                "UPDATE inodes SET mode=mode&?1 WHERE ino=?2",
+                params![0o1777, ino],
+            )?;
+        }
         if sync {
             self.sync_inode(ino)?;
         }
@@ -1066,13 +1068,12 @@ impl FileSystem {
         if !stage.dirty {
             return Ok(());
         }
-        stage.file.as_file().sync_all()?;
+        // The stage is disposable and never referenced by committed metadata.
+        // ingest_inode fsyncs the final objects and their directory before the
+        // single FULL-synchronous transaction publishes both recipe and inode.
         stage.file.as_file_mut().seek(SeekFrom::Start(0))?;
-        let (id, size) = self.repo.ingest(stage.file.as_file_mut())?;
-        self.repo.conn.execute(
-            "UPDATE inodes SET content=?1,size=?2,mtime=?3,ctime=?4 WHERE ino=?5",
-            params![id, size, stage.mtime, now_ns(), ino],
-        )?;
+        self.repo
+            .ingest_inode(stage.file.as_file_mut(), ino, stage.mtime)?;
         stage.dirty = false;
         Ok(())
     }
@@ -1111,6 +1112,7 @@ impl FileSystem {
             }
             let stage = self.ensure_stage(ino)?;
             stage.file.as_file().set_len(size)?;
+            stage.size = size;
             stage.dirty = true;
             stage.mtime = attrs.mtime_ns.unwrap_or_else(now_ns);
             self.repo.conn.execute(
