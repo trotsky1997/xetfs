@@ -293,7 +293,7 @@ pub(crate) fn write_config(root: &Path, config: &S3BackendConfig) -> Result<()> 
     temporary
         .persist(root.join(BACKEND_CONFIG))
         .map_err(|err| err.error)?;
-    fs::File::open(root)?.sync_all()?;
+    crate::platform::sync_directory(root)?;
     Ok(())
 }
 
@@ -321,7 +321,7 @@ pub(crate) fn verify_and_cache_xorb(
     temporary
         .persist(&path)
         .map_err(|err| Error::Io(err.error))?;
-    fs::File::open(root.join("objects"))?.sync_all()?;
+    crate::platform::sync_directory(&root.join("objects"))?;
     Ok(path)
 }
 
