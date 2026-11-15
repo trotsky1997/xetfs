@@ -164,8 +164,8 @@ enum VhdxCommand {
     /// Attach an XetFS-managed VHDX without formatting it.
     Attach {
         image: PathBuf,
-        #[arg(long, default_value = "V")]
-        drive: String,
+        #[arg(long)]
+        drive: Option<String>,
     },
     /// Inspect the image's logical and physical size and attachment state.
     Status { image: PathBuf },
@@ -187,14 +187,29 @@ fn vhdx(command: &VhdxCommand) -> Result<()> {
                 size_gib,
                 drive,
             } => ("create", image, *size_gib, drive.as_str()),
-            VhdxCommand::Attach { image, drive } => ("attach", image, 0, drive.as_str()),
-            VhdxCommand::Status { image } => ("status", image, 0, "V"),
-            VhdxCommand::Detach { image } => ("detach", image, 0, "V"),
+            VhdxCommand::Attach { image, drive } => {
+                ("attach", image, 0, drive.as_deref().unwrap_or(""))
+            }
+            VhdxCommand::Status { image } => ("status", image, 0, ""),
+            VhdxCommand::Detach { image } => ("detach", image, 0, ""),
         };
         let mut script = tempfile::NamedTempFile::with_suffix(".ps1")?;
         script.write_all(include_bytes!("vhdx.ps1"))?;
         script.flush()?;
-        let status = std::process::Command::new("powershell.exe")
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        }
+        let mut buffer = vec![0u16; 32768];
+        // Resolve the trusted system directory through Windows, not PATH or environment values.
+        let count = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        anyhow::ensure!(
+            count > 0 && (count as usize) < buffer.len(),
+            "GetSystemDirectoryW failed"
+        );
+        let powershell = PathBuf::from(String::from_utf16(&buffer[..count as usize])?)
+            .join("WindowsPowerShell/v1.0/powershell.exe");
+        let status = std::process::Command::new(powershell)
             .args([
                 "-NoLogo",
                 "-NoProfile",

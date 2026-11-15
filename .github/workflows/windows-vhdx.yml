@@ -1,7 +1,7 @@
 name: Windows VHDX deployment build
 on:
   push:
-    branches: [windows-vhdx]
+    branches: [main, windows-vhdx]
   workflow_dispatch:
 permissions:
   contents: read
