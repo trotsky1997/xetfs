@@ -190,15 +190,18 @@ fn object_path(bucket: &str, key: &str) -> S3Result<PathBuf> {
     validate_bucket_name(bucket)?;
     validate_key(key)?;
     let encoded = URL_SAFE_NO_PAD.encode(key.as_bytes());
-    let mut path = PathBuf::from(format!("/{bucket}/{INTERNAL_OBJECT_DIR}"));
+    // FileSystem paths use POSIX separators on every host. PathBuf::push would
+    // insert backslashes on Windows and publish a different virtual filename.
+    let mut path = format!("/{bucket}/{INTERNAL_OBJECT_DIR}");
     for start in (0..encoded.len()).step_by(KEY_COMPONENT_BYTES) {
         let end = (start + KEY_COMPONENT_BYTES).min(encoded.len());
         let component = encoded
             .get(start..end)
             .ok_or_else(|| s3_error!(InternalError, "invalid internal key encoding"))?;
-        path.push(component);
+        path.push('/');
+        path.push_str(component);
     }
-    Ok(path)
+    Ok(PathBuf::from(path))
 }
 
 fn remove_path(fs: &mut FileSystem, path: &std::path::Path) -> Result<bool> {
@@ -955,6 +958,7 @@ mod tests {
         let keys = vec!["folder/a.bin", "../escape", "a//b", ".", long.as_str()];
         for key in keys {
             let path = object_path("bucket", key).unwrap();
+            assert!(!path.as_os_str().as_encoded_bytes().contains(&b'\\'));
             assert!(path.starts_with(format!("/bucket/{INTERNAL_OBJECT_DIR}")));
             assert!(
                 path.components()
