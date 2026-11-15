@@ -173,6 +173,23 @@ xetfs.exe --repo C:\path\to\repository mount X:
 
 挂载点必须为空，并与仓库目录分离。Linux 挂载使用 `default_permissions`、`nodev`、`nosuid`。仓库同一时间由一个进程持有，挂载期间其他仓库 CLI 命令返回 Busy；先卸载，再进行快照和 GC 管理。CLI/Rust 库是仓库管理接口，文件权限的内核检查发生在 FUSE 挂载上。
 
+## Windows 动态 VHDX 仓库卷
+
+管理员可用内置 `vhdx` 命令创建按实际写入增长的动态 VHDX，不需要 Hyper-V PowerShell 模块。VHDX 提供 NTFS 仓库卷，XetFS 再通过 WinFsp 提供去重文件盘：
+
+```powershell
+New-Item -ItemType Directory -Force D:\XetFS | Out-Null
+xetfs.exe vhdx create D:\XetFS\repository.vhdx --size-gib 1024 --drive V
+xetfs.exe --repo V:\repository init
+xetfs.exe --repo V:\repository mount X:
+# 先 Ctrl+C 停止 XetFS 挂载，再卸载其仓库卷：
+xetfs.exe vhdx detach D:\XetFS\repository.vhdx
+xetfs.exe vhdx attach D:\XetFS\repository.vhdx --drive V
+xetfs.exe vhdx status D:\XetFS\repository.vhdx
+```
+
+创建不会预分配全部逻辑容量；这是 VHDX 动态分配，不是给镜像文件设置 NTFS sparse 属性。底层卷仍需有足够实际空间。删除文件不保证镜像自动缩小；本命令不自动压实镜像。已有镜像或旁路所有权记录存在时拒绝创建，格式化只发生在刚创建并核验身份、大小的 RAW 虚拟盘上。挂载和卸载均核对磁盘及分区身份；占用中的卷拒绝卸载。`attach` 未指定 `--drive` 时恢复记录的盘符。失败时保留镜像供检查，不自动删除或重新格式化。镜像旁的 `.xetfs.json` 记录需要与镜像一起保留。它不改变 XetFS 仓库格式或可写大文件重分块的现有行为。
+
 ## 快照与回收
 
 ```sh

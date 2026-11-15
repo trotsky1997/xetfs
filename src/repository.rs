@@ -576,6 +576,23 @@ impl Repository {
     }
     /// Objects become durable before the transaction publishes their index.
     pub fn ingest(&mut self, input: impl Read) -> Result<(String, u64)> {
+        self.ingest_inner(input, None)
+    }
+    pub(crate) fn ingest_inode(
+        &mut self,
+        input: impl Read,
+        ino: u64,
+        mtime: i64,
+    ) -> Result<(String, u64)> {
+        self.ingest_inner(input, Some((ino, mtime)))
+    }
+    fn ingest_inner(
+        &mut self,
+        input: impl Read,
+        inode: Option<(u64, i64)>,
+    ) -> Result<(String, u64)> {
+        let trace = std::env::var_os("XETFS_TRACE_IO").is_some();
+        let started = std::time::Instant::now();
         let tx = self.conn.transaction()?;
         let mut pack = Pack::default();
         let mut seen = HashSet::new();
@@ -608,6 +625,7 @@ impl Repository {
             pack.add(h, len, record);
         }
         save_pack(&tx, &self.root, self.object_store.as_ref(), &mut pack)?;
+        let objects_durable = started.elapsed();
         let id = hash::to_hex(&hash::file_hash(&recipe));
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO contents VALUES (?1,?2)",
@@ -621,7 +639,23 @@ impl Repository {
                 offset += len;
             }
         }
+        if let Some((ino, mtime)) = inode {
+            let updated = tx.execute(
+                "UPDATE inodes SET content=?1,size=?2,mtime=?3,ctime=?4 WHERE ino=?5",
+                params![id, size, mtime, now_ns(), ino],
+            )?;
+            if updated != 1 {
+                return Err(Error::Errno(libc::ENOENT));
+            }
+        }
         tx.commit()?;
+        if trace {
+            let total = started.elapsed();
+            eprintln!(
+                "{}",
+                serde_json::json!({"op":"ingest","bytes":size,"objects_ms":objects_durable.as_secs_f64()*1000.0,"metadata_ms":(total-objects_durable).as_secs_f64()*1000.0,"total_ms":total.as_secs_f64()*1000.0})
+            );
+        }
         Ok((id, size))
     }
     pub fn read_content(&self, id: &str, offset: u64, size: usize) -> Result<Vec<u8>> {

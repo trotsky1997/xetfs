@@ -1,5 +1,7 @@
 //! Local CAS filesystem with Xet-compatible CDC, hashes and Xorb chunk records.
 pub mod chunker;
+#[cfg(test)]
+mod durable_write_tests;
 mod error;
 mod filesystem;
 #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "fuse"))]

@@ -19,6 +19,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Manage a dynamically expanding VHDX backing volume (Windows administrator).
+    Vhdx {
+        #[command(subcommand)]
+        command: VhdxCommand,
+    },
     /// Export immutable compressed chunks, or verify and restore a transfer bundle.
     Transfer {
         #[command(subcommand)]
@@ -145,6 +150,86 @@ enum Command {
         #[command(subcommand)]
         command: S3Command,
     },
+}
+#[derive(Subcommand)]
+enum VhdxCommand {
+    /// Create a new dynamic VHDX and format ONLY its newly created volume as NTFS.
+    Create {
+        image: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        size_gib: u64,
+        #[arg(long, default_value = "V")]
+        drive: String,
+    },
+    /// Attach an XetFS-managed VHDX without formatting it.
+    Attach {
+        image: PathBuf,
+        #[arg(long)]
+        drive: Option<String>,
+    },
+    /// Inspect the image's logical and physical size and attachment state.
+    Status { image: PathBuf },
+    /// Detach after all users of its repository have stopped.
+    Detach { image: PathBuf },
+}
+
+fn vhdx(command: &VhdxCommand) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        anyhow::bail!("VHDX management requires Windows and administrator privileges");
+    }
+    #[cfg(windows)]
+    {
+        let (action, image, size, drive) = match command {
+            VhdxCommand::Create {
+                image,
+                size_gib,
+                drive,
+            } => ("create", image, *size_gib, drive.as_str()),
+            VhdxCommand::Attach { image, drive } => {
+                ("attach", image, 0, drive.as_deref().unwrap_or(""))
+            }
+            VhdxCommand::Status { image } => ("status", image, 0, ""),
+            VhdxCommand::Detach { image } => ("detach", image, 0, ""),
+        };
+        let mut script = tempfile::NamedTempFile::with_suffix(".ps1")?;
+        script.write_all(include_bytes!("vhdx.ps1"))?;
+        script.flush()?;
+        // Windows PowerShell must reopen the file. Keep only the cleanup guard,
+        // not NamedTempFile's exclusive file handle, while the child runs.
+        let script = script.into_temp_path();
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
+        }
+        let mut buffer = vec![0u16; 32768];
+        // Resolve the trusted system directory through Windows, not PATH or environment values.
+        let count = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
+        anyhow::ensure!(
+            count > 0 && (count as usize) < buffer.len(),
+            "GetSystemDirectoryW failed"
+        );
+        let powershell = PathBuf::from(String::from_utf16(&buffer[..count as usize])?)
+            .join("WindowsPowerShell/v1.0/powershell.exe");
+        let status = std::process::Command::new(powershell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(script.as_os_str())
+            .env("XETFS_VHDX_ACTION", action)
+            .env("XETFS_VHDX_IMAGE", image)
+            .env("XETFS_VHDX_SIZE_GIB", size.to_string())
+            .env("XETFS_VHDX_DRIVE", drive)
+            .status()?;
+        anyhow::ensure!(status.success(), "VHDX operation failed ({status})");
+        Ok(())
+    }
 }
 #[derive(Subcommand)]
 enum TransferCommand {
@@ -388,6 +473,7 @@ fn remove(fs: &mut FileSystem, parent: u64, name: &OsStr, recursive: bool) -> Re
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Command::Vhdx { command } => return vhdx(command),
         Command::Transfer {
             command:
                 TransferCommand::Restore {
@@ -545,6 +631,7 @@ fn main() -> Result<()> {
     let uid = xetfs::platform::owner().0;
     let gid = xetfs::platform::owner().1;
     match cli.command {
+        Command::Vhdx { .. } => unreachable!(),
         Command::Transfer {
             command: TransferCommand::Export { path, destination },
         } => json(&xetfs::transfer::export(&fs, &path, &destination)?)?,
@@ -581,7 +668,7 @@ fn main() -> Result<()> {
             stream(&fs, &path, snapshot.as_deref(), 0, None, temp.as_file_mut())?;
             temp.as_file().sync_all()?;
             temp.persist(&destination)?;
-            File::open(parent)?.sync_all()?;
+            xetfs::platform::sync_directory(parent)?;
         }
         Command::Cat {
             path,

@@ -172,7 +172,7 @@ pub fn export(fs: &FileSystem, path: &Path, destination: &Path) -> Result<serde_
         "bundle manifest too large"
     );
     durable(&destination.join("manifest.json"), &bytes)?;
-    File::open(destination.join("chunks"))?.sync_all()?;
+    crate::platform::sync_directory(&destination.join("chunks"))?;
     crate::repository::sync_dir(destination)?;
     Ok(
         serde_json::json!({"bundle":sha(&bytes),"chunks":manifest.chunks.len(),"entries":manifest.entries.len(),"stored_bytes":manifest.chunks.values().map(|c| c.stored).sum::<u64>()}),
