@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install WinFsp
         run: choco install winfsp -y --version=2.0.23075
       - run: cargo fmt --all -- --check
-      - run: cargo test --locked --no-default-features --all-targets
       - run: cargo build --release --locked --no-default-features
+      - run: cargo test --release --locked --no-default-features --all-targets
       - name: Dynamic VHDX and data integrity acceptance
         shell: powershell
         run: ./scripts/test_vhdx.ps1 | Tee-Object -FilePath vhdx-results.json

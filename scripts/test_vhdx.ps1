@@ -4,7 +4,7 @@ $Binary=(Resolve-Path $Binary).Path
 $root=Join-Path $env:TEMP ('xetfs-vhdx-test-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $image=Join-Path $root 'test.vhdx'
-function Cli([string[]]$a){$out=& $Binary @a;if($LASTEXITCODE -ne 0){throw ('CLI failed: '+($a -join ' '))};$out}
+function Cli {$out=& $Binary @args;if($LASTEXITCODE -ne 0){throw ('CLI failed: '+($args -join ' '))};$out}
 try {
  $first=Cli @('vhdx','create',$image,'--size-gib','2','--drive','V') | ConvertFrom-Json
  if(-not $first.Attached -or $first.LogicalBytes -ne 2GB -or $first.ImageFileBytes -ge 512MB){throw 'Dynamic allocation verification failed'}

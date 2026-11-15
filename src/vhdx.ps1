@@ -17,12 +17,28 @@ try {
    if($gib -lt 1 -or $gib -gt 16384){throw 'size-gib must be between 1 and 16384'}
    if((Test-Path -LiteralPath $image) -or (Test-Path -LiteralPath $sidecar)){throw 'Image or ownership record already exists; refusing overwrite'}
    if(Get-PSDrive -Name $drive -ErrorAction SilentlyContinue){throw 'Drive letter is already in use'}
-   $script=[IO.Path]::GetTempFileName()
-   try {
-    [IO.File]::WriteAllText($script,('create vdisk file="'+$image+'" maximum='+($gib*1024)+' type=expandable'+[Environment]::NewLine+'exit'),[Text.Encoding]::Unicode)
-    $output=& diskpart.exe /s $script 2>&1
-    if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $image)){throw ('VHDX creation failed: '+($output -join ' '))}
-   } finally {Remove-Item -LiteralPath $script -Force}
+   Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class XetCreateVirtualDisk {
+ [StructLayout(LayoutKind.Sequential)] struct Storage {public uint Device;public Guid Vendor;}
+ [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct Parameters {
+  public uint Version;public Guid Id;public ulong Size;public uint Block;public uint Sector;public uint PhysicalSector;
+  [MarshalAs(UnmanagedType.LPWStr)]public string Parent;
+  [MarshalAs(UnmanagedType.LPWStr)]public string Source;
+  public uint OpenFlags;public Storage ParentType;public Storage SourceType;public Guid Resiliency;
+ }
+ [DllImport("virtdisk.dll",CharSet=CharSet.Unicode)] static extern uint CreateVirtualDisk(ref Storage type,string path,uint access,IntPtr security,uint flags,uint providerFlags,ref Parameters parameters,IntPtr overlapped,out SafeFileHandle handle);
+ public static void Create(string path,ulong size) {
+  var type=new Storage{Device=3,Vendor=new Guid("EC984AEC-A0F9-47E9-901F-71415A66345B")};
+  var p=new Parameters{Version=2,Id=Guid.NewGuid(),Size=size,Block=2097152,Sector=512,PhysicalSector=4096};
+  SafeFileHandle h;uint e=CreateVirtualDisk(ref type,path,0,IntPtr.Zero,0,0,ref p,IntPtr.Zero,out h);
+  if(h!=null)h.Dispose();if(e!=0)throw new System.ComponentModel.Win32Exception((int)e,"CreateVirtualDisk failed");
+ }
+}
+'@
+   [XetCreateVirtualDisk]::Create($image,[uint64]($gib*1GB))
    $record=[ordered]@{Schema=1;Image=$image;SizeBytes=$gib*1GB;DiskUniqueId=$null;PartitionGuid=$null;Drive=$drive;CreatedUtc=[DateTime]::UtcNow.ToString('o');State='created'}
    $record | ConvertTo-Json | Set-Content -LiteralPath $sidecar -Encoding UTF8
    $v=Mount-DiskImage -ImagePath $image -NoDriveLetter -PassThru
@@ -63,18 +79,20 @@ public static class XetVolumeLock {
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string p,uint a,uint s,IntPtr z,uint c,uint f,IntPtr t);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool DeviceIoControl(SafeFileHandle h,uint c,IntPtr i,uint n,IntPtr o,uint m,out uint r,IntPtr v);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool FlushFileBuffers(SafeFileHandle h);
- public static void Check(string p) {
-  using(var h=CreateFileW(p,0xC0000000,3,IntPtr.Zero,3,0,IntPtr.Zero)) {
+ public static SafeFileHandle Lock(string p) {
+  var h=CreateFileW(p,0xC0000000,3,IntPtr.Zero,3,0,IntPtr.Zero);
+  try {
    if(h.IsInvalid)throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
    uint r;if(!DeviceIoControl(h,0x90018,IntPtr.Zero,0,IntPtr.Zero,0,out r,IntPtr.Zero))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(),"Volume is busy; stop repository users before detaching");
    if(!FlushFileBuffers(h))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-  }
+   return h;
+  }catch{h.Dispose();throw;}
  }
 }
 '@
      if(-not $partition.DriveLetter){throw 'Volume has no drive letter; inspect manually'}
-     [XetVolumeLock]::Check('\\.\'+$partition.DriveLetter+':')
-     Dismount-DiskImage -ImagePath $image
+     $volumeLock=[XetVolumeLock]::Lock('\\.\'+$partition.DriveLetter+':')
+     try{Dismount-DiskImage -ImagePath $image | Out-Null}finally{$volumeLock.Dispose()}
     }
    }
   }
