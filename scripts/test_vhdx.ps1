@@ -7,7 +7,7 @@ $image=Join-Path $root 'test.vhdx'
 $drive=[string]([char[]]'WVUTSRQPONMLKJIHGFE' | Where-Object {-not(Get-PSDrive -Name ([string]$_) -ErrorAction SilentlyContinue)} | Select-Object -First 1)
 if(-not $drive){throw 'No free test drive letter'}
 $repo=$drive+':\repository'
-function Invoke-Xet {$out=& $Binary @args;if($LASTEXITCODE -ne 0){throw ('CLI failed: '+($args -join ' '))};$out}
+function Invoke-Xet([string[]]$Arguments) {$out=& $Binary @Arguments;if($LASTEXITCODE -ne 0){throw ('CLI failed: '+($Arguments -join ' '))};$out}
 try {
  $first=Invoke-Xet @('vhdx','create',$image,'--size-gib','2','--drive',$drive) | ConvertFrom-Json
  if(-not $first.Attached -or $first.LogicalBytes -ne 2GB -or $first.ImageFileBytes -ge 512MB){throw 'Dynamic allocation verification failed'}
@@ -34,7 +34,7 @@ try {
  Invoke-Xet @('vhdx','detach',$image) | Out-Null
  [pscustomobject]@{Passed=$true;DynamicAllocation=$true;OverwriteRejected=$true;ReattachHash=$true;BusyDetachRejected=$true;RecordedDriveRestored=$true;InitialImageBytes=$first.ImageFileBytes;LogicalBytes=$first.LogicalBytes} | ConvertTo-Json
 } finally {
- if((Get-DiskImage -ImagePath $image -ErrorAction SilentlyContinue).Attached){Dismount-DiskImage -ImagePath $image}
+ if((Get-DiskImage -ImagePath $image -ErrorAction SilentlyContinue).Attached){Dismount-DiskImage -ImagePath $image | Out-Null}
  # Only this script's freshly created fixture directory.
  if([IO.Path]::GetFullPath($root).StartsWith([IO.Path]::GetFullPath($env:TEMP)+'\') -and (Split-Path $root -Leaf) -match '^xetfs-vhdx-test-[0-9a-f]{32}$'){Remove-Item -LiteralPath $root -Recurse -Force}
 }

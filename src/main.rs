@@ -668,7 +668,7 @@ fn main() -> Result<()> {
             stream(&fs, &path, snapshot.as_deref(), 0, None, temp.as_file_mut())?;
             temp.as_file().sync_all()?;
             temp.persist(&destination)?;
-            File::open(parent)?.sync_all()?;
+            xetfs::platform::sync_directory(parent)?;
         }
         Command::Cat {
             path,

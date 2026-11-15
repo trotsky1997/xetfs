@@ -1,5 +1,10 @@
 use std::{ffi::OsStr, fs::File, io};
 
+/// Persist directory metadata using the host's required directory-open flags.
+pub fn sync_directory(path: &std::path::Path) -> crate::Result<()> {
+    crate::repository::sync_dir(path)
+}
+
 #[cfg(unix)]
 pub fn name_from_bytes(bytes: &[u8]) -> crate::Result<&OsStr> {
     use std::os::unix::ffi::OsStrExt;
