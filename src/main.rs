@@ -196,6 +196,9 @@ fn vhdx(command: &VhdxCommand) -> Result<()> {
         let mut script = tempfile::NamedTempFile::with_suffix(".ps1")?;
         script.write_all(include_bytes!("vhdx.ps1"))?;
         script.flush()?;
+        // Windows PowerShell must reopen the file. Keep only the cleanup guard,
+        // not NamedTempFile's exclusive file handle, while the child runs.
+        let script = script.into_temp_path();
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn GetSystemDirectoryW(buffer: *mut u16, size: u32) -> u32;
@@ -218,7 +221,7 @@ fn vhdx(command: &VhdxCommand) -> Result<()> {
                 "Bypass",
                 "-File",
             ])
-            .arg(script.path())
+            .arg(script.as_os_str())
             .env("XETFS_VHDX_ACTION", action)
             .env("XETFS_VHDX_IMAGE", image)
             .env("XETFS_VHDX_SIZE_GIB", size.to_string())
