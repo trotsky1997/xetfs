@@ -1,7 +1,8 @@
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     ffi::OsStr,
     io::{self, Read},
-    os::unix::ffi::OsStrExt,
 };
 use xetfs::{Error, FileSystem, Kind, Repository, SetAttr, chunker::Chunker};
 
@@ -215,10 +216,13 @@ fn symlink_resolution_and_non_utf8_names() {
     is_errno(fs.resolve("/relative/"), libc::ENOTDIR);
     fs.symlink(1, OsStr::new("loop"), b"loop", 1, 1).unwrap();
     is_errno(fs.resolve("/loop"), libc::ELOOP);
-    let raw = OsStr::from_bytes(b"raw-\xff");
-    let n = fs.create(1, raw, 0o600, 1, 1).unwrap();
-    assert_eq!(fs.lookup(1, raw).unwrap().ino, n.ino);
-    assert!(fs.list(1).unwrap().iter().any(|e| e.name == b"raw-\xff"));
+    #[cfg(unix)]
+    {
+        let raw = OsStr::from_bytes(b"raw-\xff");
+        let n = fs.create(1, raw, 0o600, 1, 1).unwrap();
+        assert_eq!(fs.lookup(1, raw).unwrap().ino, n.ino);
+        assert!(fs.list(1).unwrap().iter().any(|e| e.name == b"raw-\xff"));
+    }
 }
 #[test]
 fn handle_access_modes_and_gc_exclusion() {
@@ -229,10 +233,11 @@ fn handle_access_modes_and_gc_exclusion() {
     assert!(matches!(fs.gc(true), Err(Error::Busy)));
     fs.close_handle(r).unwrap();
     let w = fs
-        .open_handle(a.ino, libc::O_WRONLY | libc::O_SYNC)
+        .open_handle(a.ino, libc::O_WRONLY | xetfs::platform::SYNC_FLAGS)
         .unwrap();
     is_errno(fs.read_handle(w, 0, 1), libc::EBADF);
     fs.write_handle(w, 0, b"b").unwrap();
+    fs.sync_inode(a.ino).unwrap();
     fs.repository().fsck().unwrap();
     fs.close_handle(w).unwrap();
     is_errno(fs.close_handle(w), libc::EBADF);
