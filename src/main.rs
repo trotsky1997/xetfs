@@ -19,6 +19,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Manage a dynamically expanding VHDX backing volume (Windows administrator).
+    Vhdx {
+        #[command(subcommand)]
+        command: VhdxCommand,
+    },
     /// Export immutable compressed chunks, or verify and restore a transfer bundle.
     Transfer {
         #[command(subcommand)]
@@ -145,6 +150,68 @@ enum Command {
         #[command(subcommand)]
         command: S3Command,
     },
+}
+#[derive(Subcommand)]
+enum VhdxCommand {
+    /// Create a new dynamic VHDX and format ONLY its newly created volume as NTFS.
+    Create {
+        image: PathBuf,
+        #[arg(long, default_value_t = 1024)]
+        size_gib: u64,
+        #[arg(long, default_value = "V")]
+        drive: String,
+    },
+    /// Attach an XetFS-managed VHDX without formatting it.
+    Attach {
+        image: PathBuf,
+        #[arg(long, default_value = "V")]
+        drive: String,
+    },
+    /// Inspect the image's logical and physical size and attachment state.
+    Status { image: PathBuf },
+    /// Detach after all users of its repository have stopped.
+    Detach { image: PathBuf },
+}
+
+fn vhdx(command: &VhdxCommand) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+        anyhow::bail!("VHDX management requires Windows and administrator privileges");
+    }
+    #[cfg(windows)]
+    {
+        let (action, image, size, drive) = match command {
+            VhdxCommand::Create {
+                image,
+                size_gib,
+                drive,
+            } => ("create", image, *size_gib, drive.as_str()),
+            VhdxCommand::Attach { image, drive } => ("attach", image, 0, drive.as_str()),
+            VhdxCommand::Status { image } => ("status", image, 0, "V"),
+            VhdxCommand::Detach { image } => ("detach", image, 0, "V"),
+        };
+        let mut script = tempfile::NamedTempFile::with_suffix(".ps1")?;
+        script.write_all(include_bytes!("vhdx.ps1"))?;
+        script.flush()?;
+        let status = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(script.path())
+            .env("XETFS_VHDX_ACTION", action)
+            .env("XETFS_VHDX_IMAGE", image)
+            .env("XETFS_VHDX_SIZE_GIB", size.to_string())
+            .env("XETFS_VHDX_DRIVE", drive)
+            .status()?;
+        anyhow::ensure!(status.success(), "VHDX operation failed ({status})");
+        Ok(())
+    }
 }
 #[derive(Subcommand)]
 enum TransferCommand {
@@ -388,6 +455,7 @@ fn remove(fs: &mut FileSystem, parent: u64, name: &OsStr, recursive: bool) -> Re
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
+        Command::Vhdx { command } => return vhdx(command),
         Command::Transfer {
             command:
                 TransferCommand::Restore {
@@ -545,6 +613,7 @@ fn main() -> Result<()> {
     let uid = xetfs::platform::owner().0;
     let gid = xetfs::platform::owner().1;
     match cli.command {
+        Command::Vhdx { .. } => unreachable!(),
         Command::Transfer {
             command: TransferCommand::Export { path, destination },
         } => json(&xetfs::transfer::export(&fs, &path, &destination)?)?,

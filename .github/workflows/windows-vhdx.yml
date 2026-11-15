@@ -1,0 +1,32 @@
+name: Windows VHDX deployment build
+on:
+  push:
+    branches: [windows-vhdx]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install WinFsp
+        run: choco install winfsp -y --version=2.0.23075
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --no-default-features --all-targets
+      - run: cargo build --release --locked --no-default-features
+      - name: Dynamic VHDX and data integrity acceptance
+        shell: powershell
+        run: ./scripts/test_vhdx.ps1 | Tee-Object -FilePath vhdx-results.json
+      - name: WinFsp mount acceptance
+        run: python scripts/windows_mount_acceptance.py target/release/xetfs.exe --report windows-mount.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xetfs-windows-vhdx
+          path: |
+            target/release/xetfs.exe
+            vhdx-results.json
+            windows-mount.json
